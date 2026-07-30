@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 18 is the floor the proxy declares (global fetch); 22 is what it runs on.
+        node: ["18", "20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: proxy/package-lock.json
+
+      - name: Install
+        working-directory: proxy
+        run: npm ci
+
+      - name: Test
+        working-directory: proxy
+        run: npm test
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the proxy image
+        run: docker build -t surfingalien-proxy:ci ./proxy
+
+      - name: Boot it and check health
+        run: |
+          docker run -d --name proxy -p 8787:8787 -e PORT=8787 surfingalien-proxy:ci
+          for i in $(seq 1 30); do
+            if curl -fsS localhost:8787/api/health > /dev/null; then
+              echo "healthy after ${i}s"
+              curl -fsS localhost:8787/api/health
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "proxy never became healthy" >&2
+          docker logs proxy >&2
+          exit 1
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f proxy || true
+
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # env_file points at proxy/.env, which is gitignored; the example stands
+      # in so a broken compose file fails here rather than on someone's laptop.
+      - name: Validate docker-compose.yml
+        run: |
+          cp proxy/.env.example proxy/.env
+          docker compose config --quiet
+          echo "compose config OK"
