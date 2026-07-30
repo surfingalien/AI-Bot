@@ -1,0 +1,10 @@
+[
+  {
+    "_comment": "Copy to data/users.json. Plaintext 'pass' still works and is upgraded to an scrypt hash on the first successful login, but prefer POST /api/users so a password is never written in the clear.",
+    "user": "ada",
+    "pass": "change-me-ada",
+    "role": "admin"
+  },
+  { "user": "lin", "pass": "change-me-lin", "role": "user" },
+  { "user": "ops", "pass": "change-me-ops", "role": "user" }
+]
