@@ -8,10 +8,13 @@ The model key only ever lives on the server.
 
 ```
 AI-Bot/
+├── install.sh             # install/upgrade/uninstall as a managed service
+├── packaging/             # systemd unit + launchd plist templates
 ├── docker-compose.yml     # proxy + nginx (serves the UIs, reverse-proxies /api)
 ├── nginx.conf
 ├── proxy/                 # the backend
 │   ├── server.js          # boot: sweep tenants, start timers, listen
+│   ├── bin/surfingalien.js  # the CLI entry point
 │   ├── src/
 │   │   ├── config.js      # env -> config (pure, so tests can inject)
 │   │   ├── ids.js         # username -> collision-free tenant id
@@ -21,22 +24,84 @@ AI-Bot/
 │   │   ├── util.js        # calc / convert / natural-language time
 │   │   ├── tools.js       # the tool definitions, all tenant-bound
 │   │   ├── agent.js       # the tool loop
+│   │   ├── cli.js         # doctor / health / user management
 │   │   ├── offline.js     # intent rules for when no model key is set
 │   │   └── app.js         # express app, auth, routes, schedulers
-│   └── test/              # 39 tests, incl. the isolation guarantees
+│   └── test/              # 57 tests, incl. the isolation guarantees
 ├── web/                   # static UIs on :8080 (launcher + your hud/deck/manifest)
 └── docs/REVIEW.md         # findings from reviewing the original single-file draft
 ```
 
-## Quick start
+## Install it as a service
 
 ```bash
-cp proxy/.env.example proxy/.env     # edit: provider, model key, auth mode
-docker compose up -d --build
-open http://localhost:8080           # UIs; the API is same-origin at /api/*
+sudo ./install.sh --admin ada          # system-wide, systemd, dedicated user
+./install.sh --admin ada               # per-user (systemd --user, or launchd on macOS)
 ```
 
-Without Docker:
+That installs the code, production dependencies and a `surfingalien` CLI, writes
+a `0600` config, provisions your first admin, registers a service that starts at
+boot, and waits until `/api/health` answers before claiming success.
+
+Re-run it to upgrade in place — code is replaced, your `.env` and brains are not.
+
+```bash
+./install.sh --uninstall            # removes the service; keeps your data
+./install.sh --uninstall --purge    # ...and deletes DATA_DIR too
+```
+
+| | root | non-root |
+|---|---|---|
+| code | `/opt/surfingalien` | `~/.local/share/surfingalien` |
+| data | `/var/lib/surfingalien` | `<prefix>/data` |
+| service | systemd system unit, own user | systemd `--user`, or launchd |
+
+Useful flags: `--prefix`, `--data-dir`, `--port`, `--auth open\|token\|session`,
+`--admin <name>`, `--admin-password-file <f>`, `--service-user`, `--no-service`,
+`--no-start`, `--yes`. Run `./install.sh --help` for the full list.
+
+```bash
+systemctl status surfingalien        # or: systemctl --user status surfingalien
+journalctl -u surfingalien -f
+```
+
+The systemd unit runs as a dedicated account with `ProtectSystem=strict` and
+`ReadWritePaths` limited to `DATA_DIR`. `MemoryDenyWriteExecute` is explicitly
+**off** — V8's JIT needs W→X pages and the process dies at startup with it on.
+
+## The CLI
+
+Installed as `surfingalien`. It reads the same config the service does, so it
+works from any directory with no flags.
+
+```bash
+surfingalien doctor          # config, permissions, auth posture, storage
+surfingalien health          # probe a running instance (--json for scripts)
+surfingalien user list       # users and their tenant ids
+surfingalien user add ada --role admin
+surfingalien user passwd ada
+surfingalien user rm ada --purge      # --purge also deletes their brain
+surfingalien token           # a fresh random API token
+surfingalien start           # run in the foreground
+```
+
+`user` commands operate directly on `DATA_DIR`, so you can provision the first
+admin before anything is running. Passwords come from a TTY prompt,
+`--password-file`, or stdin — prefer those over `--password`, which lands in
+your shell history and in `ps` output.
+
+Global flags: `--data-dir`, `--port`, and `--config <path>` for the env file.
+It is `--config`, not `--env-file`, because node itself swallows `--env-file`
+even when it appears after the script path.
+
+## Other ways to run it
+
+```bash
+docker compose up -d --build         # proxy + nginx; UIs on :8080, API same-origin
+docker compose exec proxy surfingalien user add ada --role admin
+```
+
+Or straight from a checkout, no install:
 
 ```bash
 cd proxy && npm install && npm start          # API on :8787
@@ -86,8 +151,9 @@ re-armed before the scheduler starts ticking.
 
 ## Managing users
 
-`data/users.json` is hot-reloaded on mtime change. Bootstrap it once with
-`ADMIN_USER`/`ADMIN_PASS` (hashed on the way in), then:
+`surfingalien user add|list|passwd|rm` is the easiest path and needs nothing
+running. `ADMIN_USER`/`ADMIN_PASS` still seed the first admin on a cold boot
+(hashed on the way in). Over HTTP, as an admin session or the service token:
 
 ```bash
 TOKEN=...        # an admin session token, or API_TOKEN
@@ -149,9 +215,13 @@ curl -X POST localhost:8080/api/agent -H "Authorization: Bearer $TOKEN" \
 cd proxy && npm test
 ```
 
-39 tests covering tenant-id collisions, per-route isolation, SSE scoping,
+57 tests covering tenant-id collisions, per-route isolation, SSE scoping,
 multi-device delivery, boot-sweep re-arming, auth modes, session revocation,
-password hashing and migration, atomic/corrupt-brain handling, and the tools.
+password hashing and migration, atomic/corrupt-brain handling, the tools, and
+the CLI (run as a real subprocess, the way an operator invokes it).
+
+CI additionally installs via `install.sh` on Linux and macOS, exercises the
+installed CLI, starts the service, upgrades in place, and uninstalls.
 
 ## Deploying beyond localhost
 

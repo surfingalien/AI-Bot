@@ -1,8 +1,14 @@
 "use strict";
-require("dotenv").config();
+const fs = require("fs");
 
-const { loadConfig } = require("./src/config");
+const { loadConfig, envFilePath } = require("./src/config");
 const { createApp, startSchedulers } = require("./src/app");
+
+// Load the .env from the install root, not the working directory — a service
+// unit starts wherever systemd/launchd feels like. Values already in the
+// environment win, which is how the unit file overrides the file.
+const envFile = envFilePath(process.env);
+if (fs.existsSync(envFile)) require("dotenv").config({ path: envFile });
 
 const config = loadConfig(process.env);
 const ctx = createApp(config);

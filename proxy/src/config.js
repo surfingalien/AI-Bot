@@ -12,7 +12,10 @@ const bool = (v, d) => (v == null || v === "" ? d : /^(1|true|yes|on)$/i.test(St
  * tests can construct isolated servers without touching process.env.
  */
 function loadConfig(env = process.env) {
-  const dataDir = env.DATA_DIR || "./data";
+  // Resolved to an absolute path: a systemd/launchd unit has no meaningful
+  // working directory, and a relative DATA_DIR would silently create a second,
+  // empty brain store wherever the process happened to start.
+  const dataDir = path.resolve(env.DATA_DIR || "./data");
   return {
     port: int(env.PORT, 8787),
     baseUrl: (env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, ""),
@@ -48,4 +51,9 @@ function loadConfig(env = process.env) {
   };
 }
 
-module.exports = { loadConfig };
+/** Where the .env lives: explicit override, else next to the install root. */
+function envFilePath(env = process.env) {
+  return env.SURFINGALIEN_ENV_FILE || path.join(__dirname, "..", ".env");
+}
+
+module.exports = { loadConfig, envFilePath };

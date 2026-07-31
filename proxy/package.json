@@ -4,6 +4,8 @@
   "private": true,
   "description": "SurfingAlien AI proxy — one isolated brain per principal, sessions, scoped SSE, server-pushed reminders.",
   "main": "server.js",
+  "bin": { "surfingalien": "bin/surfingalien.js" },
+  "files": ["bin/", "src/", "server.js", "users.example.json", ".env.example"],
   "engines": { "node": ">=18" },
   "scripts": {
     "start": "node server.js",

@@ -57,6 +57,93 @@ jobs:
         if: always()
         run: docker rm -f proxy || true
 
+  install:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The macOS leg exercises the installer under BSD userland (cp/ln/sed/stat)
+        # and the non-Linux path defaults, which is where shell portability breaks.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Shell syntax
+        run: bash -n install.sh
+
+      - name: shellcheck
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --severity=warning install.sh
+
+      - name: Install (files + CLI, no service manager)
+        run: |
+          ./install.sh --prefix "$HOME/sa" --data-dir "$HOME/sa-data" \
+                       --port 8799 --auth session --no-service --yes
+
+      # Only one install exists at this point, so the `surfingalien` on PATH is
+      # unambiguously $HOME/sa. Later steps that add a second install must not
+      # rely on the shared symlink — see the explicit paths below.
+      - name: The installed CLI works from anywhere
+        run: |
+          cd /
+          export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+          surfingalien version
+          surfingalien doctor
+          printf 'ada-password\n' | surfingalien user add ada --role admin
+          surfingalien user list --json | tee /dev/stderr | grep -q '"user": "ada"'
+
+      - name: The installed service starts and answers on its configured port
+        run: |
+          export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+          surfingalien start & echo $! > /tmp/sa.pid
+          up=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8799/api/health >/dev/null; then up=1; break; fi
+            sleep 1
+          done
+          if [ "$up" -ne 1 ]; then
+            echo "nothing came up on 8799" >&2
+            kill "$(cat /tmp/sa.pid)" 2>/dev/null || true
+            exit 1
+          fi
+          # Pin the base: a bare `health` reads whichever install the symlink
+          # points at, which is exactly how this check can pass against the
+          # wrong process.
+          surfingalien health --base http://127.0.0.1:8799
+          kill "$(cat /tmp/sa.pid)"
+
+      - name: A fresh install reports an empty user list as valid JSON
+        run: |
+          ./install.sh --prefix "$HOME/sa2" --data-dir "$HOME/sa2-data" --no-service --yes
+          node "$HOME/sa2/bin/surfingalien.js" user list --json \
+            --data-dir "$HOME/sa2-data" --config "$HOME/sa2/.env" | node -e '
+              let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+                const v=JSON.parse(s);
+                if(!Array.isArray(v)||v.length!==0) throw new Error("expected [], got "+s);
+                console.log("empty list is valid JSON");
+              })'
+
+      - name: Re-running the installer upgrades in place
+        run: |
+          cp "$HOME/sa/.env" /tmp/env.before
+          ./install.sh --prefix "$HOME/sa" --data-dir "$HOME/sa-data" --no-service --yes
+          diff /tmp/env.before "$HOME/sa/.env"
+          test -d "$HOME/sa-data/users"
+
+      - name: Uninstall keeps data, --purge removes it
+        run: |
+          ./install.sh --prefix "$HOME/sa" --data-dir "$HOME/sa-data" --uninstall
+          test ! -d "$HOME/sa"
+          test -d "$HOME/sa-data"
+          ./install.sh --prefix "$HOME/sa2" --data-dir "$HOME/sa2-data" --uninstall --purge
+          test ! -d "$HOME/sa2-data"
+
   compose-config:
     runs-on: ubuntu-latest
     steps:
