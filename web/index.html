@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>SURFINGALIEN // LAUNCH</title>
+<style>
+*{box-sizing:border-box;margin:0}
+body{min-height:100vh;font-family:'Space Grotesk',system-ui,sans-serif;color:#eaf4ff;background:#04102a;
+ display:grid;place-items:center;padding:6vw;
+ background-image:radial-gradient(60% 50% at 80% 10%,rgba(84,214,255,.12),transparent 60%),
+                  radial-gradient(50% 60% at 10% 90%,rgba(255,206,77,.08),transparent 60%)}
+.wrap{max-width:680px;width:100%}
+.k{font-family:ui-monospace,'JetBrains Mono',monospace;font-size:11px;letter-spacing:4px;color:#54d6ff}
+h1{font-size:clamp(40px,8vw,84px);line-height:.88;letter-spacing:-2px;margin:18px 0 10px}
+h1 b{color:#ffce4d}
+p{font-family:ui-monospace,'JetBrains Mono',monospace;font-size:13px;color:#9fb8d8;line-height:1.7;margin-bottom:30px}
+a{display:flex;align-items:center;gap:14px;text-decoration:none;color:#eaf4ff;
+ border:1px solid rgba(120,190,255,.16);border-left:3px solid #1c8fc4;border-radius:3px;
+ padding:18px 20px;margin-bottom:12px;transition:.2s;background:rgba(8,32,74,.4)}
+a:hover{border-left-color:#54d6ff;transform:translateX(6px);box-shadow:0 12px 34px rgba(0,0,0,.4)}
+a .n{font-weight:700;font-size:18px}
+a .d{font-family:ui-monospace,'JetBrains Mono',monospace;font-size:11px;color:#5d7aa3}
+a .ar{margin-left:auto;color:#54d6ff;font-size:20px}
+a[data-missing]{opacity:.4;border-left-color:#ff8a5c}
+.note{font-family:ui-monospace,'JetBrains Mono',monospace;font-size:11px;color:#5d7aa3;line-height:1.7;
+ margin-top:24px;border-top:1px dashed rgba(120,190,255,.16);padding-top:18px}
+.note b{color:#9fb8d8}
+.pill{display:inline-block;font-size:10px;letter-spacing:1px;padding:2px 8px;border-radius:20px;
+ border:1px solid rgba(120,190,255,.3);color:#9fb8d8;margin-left:8px}
+.pill.ok{color:#5ff0b0;border-color:rgba(95,240,176,.5)}
+.pill.bad{color:#ff8a5c;border-color:rgba(255,138,92,.5)}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="k">ORBITAL LAUNCH PAD</div>
+  <h1>SURFING<b>ALIEN</b></h1>
+  <p>Pick a surface. Dimmed links mean that file is not in <code>web/</code> yet — drop it in and reload.</p>
+
+  <a href="hud.html" data-probe="hud.html">
+    <span><div class="n">HUD — Orbital OS</div><div class="d">assistant · voice · memory · missions</div></span>
+    <span class="ar">&rarr;</span>
+  </a>
+  <a href="deck.html" data-probe="deck.html">
+    <span><div class="n">DECK — Control Room</div><div class="d">live SSE feed · reminders · audit · login gate</div></span>
+    <span class="ar">&rarr;</span>
+  </a>
+  <a href="manifest.html" data-probe="manifest.html">
+    <span><div class="n">MANIFEST — Runbook</div><div class="d">install + preflight probe</div></span>
+    <span class="ar">&rarr;</span>
+  </a>
+
+  <div class="note">
+    API base for the UIs: <b id="apiBase">…</b> <span class="pill" id="apiPill">probing</span><br>
+    nginx reverse-proxies <code>/api/*</code> to the proxy container, so the UIs are
+    same-origin with the API and you can leave CORS locked down.
+  </div>
+</div>
+
+<script>
+"use strict";
+// Dim links whose file is not actually present.
+for (const a of document.querySelectorAll("a[data-probe]")) {
+  fetch(a.dataset.probe, { method: "HEAD" })
+    .then((r) => { if (!r.ok) a.setAttribute("data-missing", "1"); })
+    .catch(() => a.setAttribute("data-missing", "1"));
+}
+
+// Show the API base and whether it answers.
+const base = location.origin;
+document.getElementById("apiBase").textContent = base;
+fetch(base + "/api/health")
+  .then((r) => r.json())
+  .then((j) => {
+    const pill = document.getElementById("apiPill");
+    pill.className = "pill ok";
+    pill.textContent = "live · " + j.model + " · auth " + (j.auth.required ? "on" : "OPEN");
+  })
+  .catch(() => {
+    const pill = document.getElementById("apiPill");
+    pill.className = "pill bad";
+    pill.textContent = "unreachable";
+  });
+</script>
+</body>
+</html>

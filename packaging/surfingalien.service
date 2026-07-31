@@ -1,0 +1,54 @@
+[Unit]
+Description=SurfingAlien AI proxy
+Documentation=https://github.com/surfingalien/AI-Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+__USER_DIRECTIVES__
+WorkingDirectory=__PREFIX__
+Environment=NODE_ENV=production
+Environment=SURFINGALIEN_ENV_FILE=__ENV_FILE__
+Environment=DATA_DIR=__DATA_DIR__
+ExecStart=__NODE__ __PREFIX__/server.js
+
+# server.js handles SIGTERM: it stops the timers, closes every SSE stream and
+# drains in-flight requests before exiting.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=3
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=surfingalien
+
+# --- hardening -------------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+# ProtectSystem=strict makes the whole filesystem read-only, so name the one
+# directory the brains live in.
+ReadWritePaths=__DATA_DIR__
+
+# V8 needs to map pages writable and then executable for its JIT, so this one
+# hardening flag has to stay off — with it on the process dies at startup.
+MemoryDenyWriteExecute=false
+
+[Install]
+WantedBy=multi-user.target
