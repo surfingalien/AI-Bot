@@ -100,7 +100,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# An empty --prefix or --data-dir would turn the rm -rf calls below into
+# deletions of /src, /bin or /. Refuse before anything is touched.
+[ -n "$PREFIX" ] || die "--prefix cannot be empty"
+case "$PREFIX" in /) die "--prefix cannot be /" ;; esac
+
 [ -n "$DATA_DIR" ] || DATA_DIR="$PREFIX/data"
+case "$DATA_DIR" in /) die "--data-dir cannot be /" ;; esac
 ENV_FILE="$PREFIX/.env"
 
 case "$AUTH" in open|token|session) ;; *) die "--auth must be open, token or session" ;; esac
@@ -232,7 +238,8 @@ fi
 step "Installing to $PREFIX"
 mkdir -p "$PREFIX"
 # Replace code, never touch .env, data/ or node_modules ownership.
-rm -rf "$PREFIX/src" "$PREFIX/bin"
+# ${PREFIX:?} so an empty PREFIX aborts instead of expanding to /src and /bin.
+rm -rf "${PREFIX:?}/src" "${PREFIX:?}/bin"
 cp -R "$SRC/src" "$SRC/bin" "$PREFIX/"
 cp "$SRC/server.js" "$SRC/package.json" "$PREFIX/"
 [ -f "$SRC/package-lock.json" ] && cp "$SRC/package-lock.json" "$PREFIX/"
@@ -253,7 +260,10 @@ if [ -f "$ENV_FILE" ]; then
   ok "keeping existing $ENV_FILE"
 else
   step "Generating configuration"
-  DATA_DIR="$DATA_DIR" PORT="$PORT" "$NODE_BIN" "$PREFIX/bin/surfingalien.js" init \
+  # The explicit flags carry everything; an env prefix here would be read by
+  # the parent shell before it applied, which is exactly the confusion SC2097
+  # warns about.
+  "$NODE_BIN" "$PREFIX/bin/surfingalien.js" init \
     --auth "$AUTH" --data-dir "$DATA_DIR" --port "$PORT" --config "$ENV_FILE"
 fi
 
