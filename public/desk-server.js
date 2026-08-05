@@ -114,6 +114,98 @@
     '.sasrv-pair{display:flex;gap:6px}',
   ].join('\n');
 
+  /* ---------- voice ----------
+   *
+   * The desk's speak() lives inside the engine's closure, so it cannot be
+   * replaced from out here. speechSynthesis.speak is the boundary both sides
+   * share: intercept there and every existing call site — dossiers, mission
+   * summaries, reminders — gets briefed instead of read out as markup.
+   */
+
+  var VOICE_KEY = 'sa_srv_voice';
+  var voiceMode = 'brief'; // 'brief' | 'verbatim'
+  var speakSeq = 0;
+  var lastScript = null;
+
+  function loadVoiceMode() {
+    try {
+      var v = localStorage.getItem(VOICE_KEY);
+      if (v === 'verbatim' || v === 'brief') voiceMode = v;
+    } catch (e) {
+      /* private mode — the default stands */
+    }
+  }
+
+  function saveVoiceMode() {
+    try {
+      localStorage.setItem(VOICE_KEY, voiceMode);
+    } catch (e) {
+      /* nothing to do; the mode still applies for this session */
+    }
+  }
+
+  function installVoice() {
+    if (!('speechSynthesis' in window) || window.__saVoicePatched) return;
+    var synth = window.speechSynthesis;
+    var original = synth.speak.bind(synth);
+    window.__saVoicePatched = true;
+
+    synth.speak = function (utterance) {
+      var text = utterance && utterance.text ? String(utterance.text) : '';
+      if (voiceMode === 'verbatim' || !text) return original(utterance);
+
+      // Claim a ticket. If the desk starts saying something newer while the
+      // rewrite is in flight, the stale one is dropped rather than queued —
+      // hearing the previous answer after the current one is worse than
+      // silence.
+      var ticket = ++speakSeq;
+
+      api('/api/voice/brief', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text, title: document.title }),
+      })
+        .then(function (res) {
+          if (ticket !== speakSeq) return;
+          var script = res.json && res.json.ok && res.json.script;
+          speakScript(script || text, utterance, original, (res.json && res.json.source) || 'raw');
+        })
+        .catch(function () {
+          if (ticket !== speakSeq) return;
+          // Server unreachable mid-session: better the old behaviour than none.
+          speakScript(text, utterance, original, 'raw');
+        });
+    };
+  }
+
+  function speakScript(script, source, original, kind) {
+    lastScript = { text: script, source: kind, t: Date.now() };
+    renderVoice();
+    try {
+      var u = new SpeechSynthesisUtterance(script);
+      // A briefing reads a touch slower than a data dump; keep whatever the
+      // desk asked for otherwise.
+      u.rate = source && source.rate ? source.rate : 1;
+      u.pitch = source && source.pitch ? source.pitch : 1;
+      if (source && source.voice) u.voice = source.voice;
+      if (source && source.lang) u.lang = source.lang;
+      original(u);
+    } catch (e) {
+      /* synthesis unavailable */
+    }
+  }
+
+  function renderVoice() {
+    if (!refs.voiceMode) return;
+    refs.voiceMode.textContent = voiceMode === 'brief' ? 'BRIEFING' : 'VERBATIM';
+    refs.voiceMode.className = 'sasrv-go' + (voiceMode === 'brief' ? '' : ' gh');
+    if (refs.voiceLast) {
+      refs.voiceLast.textContent = lastScript
+        ? '“' + lastScript.text + '” — ' + lastScript.source
+        : 'Nothing spoken yet. The desk speaks when SPEAK is on in its settings.';
+    }
+  }
+
   /* ---------- genome bridge ---------- */
 
   // Read straight from localStorage rather than the engine's closure: the desk
@@ -446,6 +538,38 @@
     refs.note = el('div', 'sasrv-note');
     body.appendChild(refs.note);
 
+    body.appendChild(el('div', 'sasrv-h', 'voice'));
+    var voiceRow = el('div', 'sasrv-pair');
+    refs.voiceMode = el('button', 'sasrv-go', 'BRIEFING');
+    refs.voiceMode.onclick = function () {
+      voiceMode = voiceMode === 'brief' ? 'verbatim' : 'brief';
+      saveVoiceMode();
+      renderVoice();
+      say('voice: ' + (voiceMode === 'brief' ? 'briefing' : 'verbatim'), 'ok');
+    };
+    var tryVoice = el('button', 'sasrv-go gh', 'TEST');
+    tryVoice.onclick = function () {
+      // Deliberately the worst case: a table, citations and four-decimal
+      // figures — what a dossier actually sounds like without this.
+      var sample =
+        '## NVDA — Dossier\n| Metric | Value |\n|---|---|\n| Last | $142.6234 |\n| RSI(14) | 68.3129 |\n' +
+        '\n**VERDICT:** BUY (M) — entry $142.62 — stop $131.40 — target $168.90 — risk 6/10 [1]\n' +
+        'Momentum is positive with price 12.4531% above the 200-day average.';
+      window.speechSynthesis.speak(new SpeechSynthesisUtterance(sample));
+    };
+    voiceRow.appendChild(refs.voiceMode);
+    voiceRow.appendChild(tryVoice);
+    body.appendChild(voiceRow);
+    refs.voiceLast = el('div', 'sasrv-note');
+    body.appendChild(refs.voiceLast);
+    body.appendChild(
+      el(
+        'div',
+        'sasrv-note',
+        'Briefing rewrites what the desk is about to say into a few spoken sentences — the call first, then why, with numbers rounded the way people say them. Verbatim reads the raw text.',
+      ),
+    );
+
     body.appendChild(el('div', 'sasrv-h', 'activity'));
     refs.activity = el('div');
     body.appendChild(refs.activity);
@@ -509,6 +633,7 @@
     });
 
     renderStatus(cfg);
+    renderVoice();
   }
 
   function boot() {
@@ -516,7 +641,11 @@
     // server is down: the panel simply never appears.
     api('/api/config')
       .then(function (res) {
-        if (res.status === 200 && res.json && res.json.ok) mount(res.json);
+        if (res.status !== 200 || !res.json || !res.json.ok) return;
+        loadVoiceMode();
+        // Patch before mounting: the desk can speak the moment it boots.
+        installVoice();
+        mount(res.json);
       })
       .catch(function () {});
   }

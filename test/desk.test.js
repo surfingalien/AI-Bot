@@ -51,6 +51,7 @@ test('the panel talks to the server only through documented endpoints', () => {
     '/api/autonomy/activity',
     '/api/autonomy/goals',
     '/api/genome',
+    '/api/voice/brief',
   ]);
   for (const call of calls) {
     const base = call.replace(/\/api\/autonomy\/goals\/.*$/, '/api/autonomy/goals');
@@ -59,7 +60,22 @@ test('the panel talks to the server only through documented endpoints', () => {
 });
 
 test('the panel stays inert when the server does not answer', () => {
-  // mount() is reachable only from the /api/config success branch.
-  assert.match(panel, /if \(res\.status === 200 && res\.json && res\.json\.ok\) mount\(res\.json\)/);
-  assert.match(panel, /\.catch\(function \(\) \{\}\)/);
+  // Nothing mounts and no speech is intercepted unless /api/config confirms a
+  // server, and a failed probe is swallowed rather than logged at the operator.
+  const boot = panel.slice(panel.indexOf('function boot()'));
+  assert.match(boot, /if \(res\.status !== 200 \|\| !res\.json \|\| !res\.json\.ok\) return;/);
+  assert.ok(
+    boot.indexOf('return;') < boot.indexOf('installVoice()'),
+    'voice patching must sit behind the server check',
+  );
+  assert.ok(boot.indexOf('installVoice()') < boot.indexOf('mount('), 'patch before first speech');
+  assert.match(boot, /\.catch\(function \(\) \{\}\)/);
+});
+
+test('speech interception restores the desk behaviour when the rewrite fails', () => {
+  // A server that goes away mid-session must not leave the desk mute.
+  assert.match(panel, /voiceMode === 'verbatim' \|\| !text\) return original\(utterance\)/);
+  assert.match(panel, /speakScript\(text, utterance, original, 'raw'\)/);
+  // Stale rewrites are dropped rather than spoken after a newer answer.
+  assert.match(panel, /if \(ticket !== speakSeq\) return;/);
 });

@@ -22,6 +22,7 @@ the tab is closed.
 │  /api/v1/*           model brain proxy   │
 │  /api/autonomy/*     goals that fire     │
 │  /api/genome         brain transfer      │
+│  /api/voice/brief    speech, not recital │
 └───────────────┬──────────────────────────┘
                 │
       web · Yahoo Finance · your LLM · Slack/Discord
@@ -41,7 +42,7 @@ the Settings panel. Add `BRAIN_BASE`/`BRAIN_KEY` to `.env` and the model brain
 is wired up too, with the key staying on the server.
 
 ```bash
-npm test                  # 53 tests, no network required
+npm test                  # 73 tests, no network required
 npm run dev               # restart on change
 ```
 
@@ -176,6 +177,37 @@ Arming a goal from the panel goes through the same validation as the API, so a
 condition the server cannot evaluate is refused inline with the reason rather
 than accepted and silently never fired.
 
+### Voice that briefs instead of reciting — `POST /api/voice/brief`
+
+The desk hands its raw markdown to the browser's speech synthesiser, so a
+dossier gets read out as pipes, asterisks and four-decimal figures. Nothing
+about a table is speakable: it is a layout, and layout is what voice cannot
+carry.
+
+This endpoint answers with a spoken script instead. With a brain configured the
+model writes it under hard constraints — two to four sentences, the decision
+first, at most three numbers rounded the way people say them, no markup, name
+the caveat. Without one, a deterministic shaper strips the layout, humanizes the
+figures and keeps the opening claim. Either way the caller gets something
+speakable and never an error mid-sentence.
+
+```
+before:  "## NVDA — Dossier | Metric | Value | |---|---| | Last | $142.6234 |
+          | RSI(14) | 68.3129 | … 12.4531% … **VERDICT:** BUY (M) [1]"
+
+after:   "The call is buy, medium conviction. Momentum is constructive with
+          price 12.5 percent above the 200-day average."
+```
+
+The desk's own `speak()` lives inside its engine closure and cannot be replaced
+from outside, so `desk-server.js` intercepts `speechSynthesis.speak` — the
+boundary both sides share. Every existing call site is covered: dossiers,
+mission summaries, reminders. Text that is already speech (a reminder, a
+one-liner) skips the round trip entirely, results are cached for ten minutes so
+a repeat costs nothing, and a stale rewrite is dropped rather than spoken after
+a newer answer. **VOICE: BRIEFING / VERBATIM** in the SERVER panel switches
+between the brief and the desk's original behaviour.
+
 ### Moving a brain between runtimes
 
 The desk exports its whole state as a genome (`REPLICATE` in the UI). The
@@ -227,11 +259,11 @@ src/server.js          boot, graceful shutdown
 src/app.js             routes, CORS, error handling
 src/ui.js              serves the desk with first-run defaults injected
 src/config.js          env-driven configuration
-src/routes/            fetch · notify · yahoo · brain · autonomy · genome
+src/routes/            fetch · notify · yahoo · brain · autonomy · genome · voice
 src/market/yahoo.js    feed with crumb handling and fallbacks
 src/autonomy/          store · conditions · actions · engine · research
-src/lib/               safeFetch · htmlText · indicators · notify · rateLimit
-test/                  53 tests, no network required
+src/lib/               safeFetch · htmlText · indicators · speech · notify · rateLimit
+test/                  73 tests, no network required
 ```
 
 ## Notes on behaviour

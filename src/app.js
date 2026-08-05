@@ -8,6 +8,7 @@ import { yahooRouter } from './routes/yahoo.js';
 import { brainRouter } from './routes/brain.js';
 import { autonomyRouter } from './routes/autonomy.js';
 import { genomeRouter } from './routes/genome.js';
+import { voiceRouter } from './routes/voice.js';
 import { status } from './autonomy/engine.js';
 import { log } from './lib/log.js';
 
@@ -60,6 +61,7 @@ export function createApp() {
   app.use('/api', brainRouter);
   app.use('/api', autonomyRouter);
   app.use('/api', genomeRouter);
+  app.use('/api', voiceRouter);
 
   app.get('/', (_req, res) => {
     res.type('html').send(renderIndex());

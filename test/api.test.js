@@ -97,6 +97,42 @@ test('the embeddings passthrough exists so semantic recall can reach the model',
   assert.match(res.json.error.message, /not configured/);
 });
 
+test('voice briefs answer with something speakable even with no brain', async () => {
+  const res = await api('POST', '/api/voice/brief', {
+    text:
+      '## NVDA\n| Metric | Value |\n|---|---|\n| Last | $142.6234 |\n\n' +
+      'Momentum is constructive with price 12.4531% above the 200-day average [1].\n' +
+      '**VERDICT:** BUY (M) - entry $142.62',
+    title: 'NVDA dossier',
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.json.source, 'rules');
+  assert.match(res.json.script, /^The call is buy, medium conviction\./);
+  assert.doesNotMatch(res.json.script, /[|*#]/);
+  assert.doesNotMatch(res.json.script, /142\.6234/);
+});
+
+test('voice briefs leave text that is already speech alone', async () => {
+  const res = await api('POST', '/api/voice/brief', { text: 'Reminder: call the board at four.' });
+  assert.equal(res.json.source, 'passthrough');
+  assert.equal(res.json.script, 'Reminder: call the board at four.');
+});
+
+test('voice briefs are cached so a repeat costs nothing', async () => {
+  const body = { text: 'Revenue grew 12.5129% across every segment [1] this quarter and margins held.' };
+  const first = await api('POST', '/api/voice/brief', body);
+  const second = await api('POST', '/api/voice/brief', body);
+  assert.equal(first.json.cached, undefined);
+  assert.equal(second.json.cached, true);
+  assert.equal(first.json.script, second.json.script);
+});
+
+test('voice briefs require text', async () => {
+  const res = await api('POST', '/api/voice/brief', { text: '   ' });
+  assert.equal(res.status, 400);
+});
+
 test('the panel script is served alongside the desk', async () => {
   const res = await fetch(`${base}/desk-server.js`);
   assert.equal(res.status, 200);
