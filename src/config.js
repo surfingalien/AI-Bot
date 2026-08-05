@@ -1,0 +1,84 @@
+// Central configuration. Everything is env-driven so the same build runs
+// locally (`npm start`) and on a host without code changes.
+
+function bool(value, fallback) {
+  if (value == null || value === '') return fallback;
+  return /^(1|true|yes|on)$/i.test(String(value));
+}
+
+function int(value, fallback) {
+  const n = parseInt(value, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function list(value) {
+  return String(value || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+const env = process.env;
+
+export const config = {
+  port: int(env.PORT, 8787),
+  host: env.HOST || '0.0.0.0',
+  logLevel: env.LOG_LEVEL || 'info',
+
+  // Browsers hitting the API from another origin (e.g. the HTML opened from
+  // disk). Requests without an Origin header are always allowed.
+  corsOrigins: list(env.CORS_ORIGINS),
+
+  fetch: {
+    timeoutMs: int(env.FETCH_TIMEOUT_MS, 15000),
+    maxBytes: int(env.FETCH_MAX_BYTES, 2 * 1024 * 1024),
+    maxRedirects: int(env.FETCH_MAX_REDIRECTS, 3),
+    maxTextChars: int(env.FETCH_MAX_TEXT_CHARS, 20000),
+    userAgent:
+      env.FETCH_USER_AGENT ||
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+    // Off by default: without it, /api/fetch is an SSRF hole into whatever
+    // network the server sits on.
+    allowPrivateEgress: bool(env.ALLOW_PRIVATE_EGRESS, false),
+  },
+
+  notify: {
+    webhook: env.NOTIFY_WEBHOOK || '',
+    // A webhook supplied in the request body can point anywhere, so it is
+    // opt-in rather than the default.
+    allowRequestWebhook: bool(env.NOTIFY_ALLOW_REQUEST_WEBHOOK, false),
+  },
+
+  // Upstream OpenAI-compatible endpoint. When a key is set here the browser
+  // can talk to /api/v1/chat/completions and never sees the credential.
+  brain: {
+    base: (env.BRAIN_BASE || '').replace(/\/+$/, ''),
+    key: env.BRAIN_KEY || '',
+    model: env.BRAIN_MODEL || 'gpt-4o-mini',
+    timeoutMs: int(env.BRAIN_TIMEOUT_MS, 120000),
+    referer: env.BRAIN_REFERER || 'https://surfingalien.local',
+    title: env.BRAIN_TITLE || 'SurfingAlien AI',
+  },
+
+  market: {
+    chartRange: env.YAHOO_CHART_RANGE || '2y',
+    chartInterval: env.YAHOO_CHART_INTERVAL || '1d',
+    cacheMs: int(env.MARKET_CACHE_MS, 60000),
+  },
+
+  autonomy: {
+    enabled: bool(env.AUTONOMY_ENABLED, true),
+    tickMs: int(env.AUTONOMY_TICK_MS, 30000),
+    maxActivity: int(env.AUTONOMY_MAX_ACTIVITY, 200),
+    stateFile: env.STATE_FILE || 'data/state.json',
+  },
+
+  rateLimit: {
+    windowMs: int(env.RATE_LIMIT_WINDOW_MS, 60000),
+    max: int(env.RATE_LIMIT_MAX, 120),
+  },
+};
+
+export function brainConfigured() {
+  return Boolean(config.brain.base);
+}

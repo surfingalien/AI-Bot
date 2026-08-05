@@ -1,0 +1,19 @@
+{
+  "name": "surfingalien-ai-agent",
+  "version": "1.0.0",
+  "description": "Backend and autonomy runtime for the SurfingAlien AI deep-research desk",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "dev": "node --env-file-if-exists=.env --watch src/server.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "license": "MIT"
+}
