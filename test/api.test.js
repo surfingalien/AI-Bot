@@ -90,6 +90,22 @@ test('the brain proxy answers 503 when no upstream is configured', async () => {
   assert.match(res.json.error.message, /not configured/);
 });
 
+test('the embeddings passthrough exists so semantic recall can reach the model', async () => {
+  // 503 rather than 404: the route is wired, the upstream just is not.
+  const res = await api('POST', '/api/v1/embeddings', { input: 'remember this' });
+  assert.equal(res.status, 503);
+  assert.match(res.json.error.message, /not configured/);
+});
+
+test('the panel script is served alongside the desk', async () => {
+  const res = await fetch(`${base}/desk-server.js`);
+  assert.equal(res.status, 200);
+  assert.match(await res.text(), /SERVER RUNTIME/);
+
+  const page = await (await fetch(`${base}/`)).text();
+  assert.match(page, /<script src="\/desk-server\.js" defer><\/script>/);
+});
+
 test('invalid symbols are rejected before any upstream call', async () => {
   const res = await api('GET', '/api/yahoo/quote/not%20a%20symbol');
   assert.equal(res.status, 400);
@@ -178,6 +194,8 @@ test('genome round-trips through the server in the browser format', async () => 
     watchlist: [{ sym: 'MSFT' }],
     memory: [{ k: 'desk', v: 'equities' }],
     tasks: [{ id: 't1', text: 'review NVDA thesis', owner: 'chief', done: false }],
+    portfolio: [{ sym: 'nvda', shares: 10, cost: 118.4 }],
+    consensus: true,
   });
   assert.equal(imported.json.importedGoals, 1);
   assert.equal(imported.json.skipped.length, 1);
@@ -185,10 +203,14 @@ test('genome round-trips through the server in the browser format', async () => 
 
   const exported = await api('GET', '/api/genome');
   assert.equal(exported.json.kind, 'surfingalien-genome');
-  assert.equal(exported.json.v, 4);
+  assert.equal(exported.json.v, 5);
   assert.ok(exported.json.goals.some((g) => g.name === 'open bell'));
   assert.ok(exported.json.watchlist.some((w) => w.sym === 'MSFT'));
   assert.ok(exported.json.tasks.some((t) => t.text === 'review NVDA thesis'));
+  // Positions and the bull/bear toggle belong to the desk; the server holds
+  // them verbatim so a push/pull round trip does not drop them.
+  assert.deepEqual(exported.json.portfolio, [{ sym: 'NVDA', shares: 10, cost: 118.4 }]);
+  assert.equal(exported.json.consensus, true);
 });
 
 test('an imported open task satisfies a "tasks open" condition', async () => {

@@ -64,6 +64,9 @@ export function createApp() {
   app.get('/', (_req, res) => {
     res.type('html').send(renderIndex());
   });
+  // The desk declares no icon, so browsers ask anyway; answer quietly rather
+  // than leaving a 404 in every operator's console.
+  app.get('/favicon.ico', (_req, res) => res.status(204).end());
   app.use(express.static(path.resolve(process.cwd(), 'public'), { index: false }));
 
   app.use('/api', (_req, res) => res.status(404).json({ ok: false, error: 'no such endpoint' }));

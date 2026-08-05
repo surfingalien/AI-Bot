@@ -91,6 +91,31 @@ brainRouter.get('/brain/probe', rateLimit({ name: 'probe', max: 10 }), async (_r
   return res.status(result.ok ? 200 : 503).json({ ...result, model: config.brain.model });
 });
 
+// The desk's semantic recall embeds memories through the same base URL. Without
+// this it would silently fall back to its local bag-of-words embedding whenever
+// the key lives on the server rather than in the browser.
+brainRouter.post('/v1/embeddings', rateLimit({ name: 'embed', max: 120 }), async (req, res) => {
+  if (!brainConfigured()) {
+    return res.status(503).json({ error: { message: 'model brain not configured' } });
+  }
+  try {
+    const upstream = await fetch(brainUrl('/embeddings'), {
+      method: 'POST',
+      headers: brainHeaders(),
+      body: JSON.stringify(req.body || {}),
+      signal: AbortSignal.timeout(config.brain.timeoutMs),
+    });
+    const text = await upstream.text();
+    return res
+      .status(upstream.status)
+      .type(upstream.headers.get('content-type') || 'application/json')
+      .send(text);
+  } catch (err) {
+    log.warn(`embeddings proxy failed: ${err?.message || err}`);
+    return res.status(502).json({ error: { message: err?.message || String(err) } });
+  }
+});
+
 // Some clients probe /models before sending a first request.
 brainRouter.get('/v1/models', async (_req, res) => {
   if (!brainConfigured()) {

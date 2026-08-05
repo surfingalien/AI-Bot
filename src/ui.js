@@ -40,6 +40,7 @@ function bootstrapScript(defaults) {
   window.__SA_SERVER = d;
 })();
 </script>
+<script src="/desk-server.js" defer></script>
 `;
 }
 

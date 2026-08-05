@@ -20,7 +20,7 @@ genomeRouter.get('/genome', (_req, res) => {
   const state = getState();
   res.json({
     kind: 'surfingalien-genome',
-    v: 4,
+    v: 5,
     name: state.name,
     exported: new Date().toISOString(),
     source: 'server',
@@ -30,6 +30,10 @@ genomeRouter.get('/genome', (_req, res) => {
     goals: state.goals,
     workers: state.workers,
     watchlist: state.watchlist,
+    // Held verbatim rather than acted on: the desk owns positions and the
+    // bull/bear toggle, and a round trip must not quietly drop them.
+    portfolio: state.portfolio,
+    consensus: state.consensus,
     skills: [],
     experience: [],
   });
@@ -48,8 +52,23 @@ genomeRouter.post('/genome', (req, res) => {
     state.watchlist = [];
     state.memory = [];
     state.tasks = [];
+    state.portfolio = [];
   }
   if (typeof g.name === 'string' && g.name.trim()) state.name = g.name.trim();
+  if (typeof g.consensus === 'boolean') state.consensus = g.consensus;
+
+  for (const raw of Array.isArray(g.portfolio) ? g.portfolio : []) {
+    const sym = normalizeSymbol(raw?.sym);
+    if (!sym) continue;
+    const position = {
+      sym,
+      shares: Number(raw.shares) || 0,
+      cost: Number(raw.cost) || 0,
+    };
+    const existing = state.portfolio.findIndex((p) => p.sym === sym);
+    if (existing >= 0) state.portfolio[existing] = position;
+    else state.portfolio.push(position);
+  }
 
   const skipped = [];
   let imported = 0;

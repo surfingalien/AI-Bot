@@ -10,6 +10,7 @@ the tab is closed.
 ┌──────────────────────────────────────────┐
 │  public/index.html — the desk            │
 │  agents · tools · sandbox · dossiers     │
+│  + desk-server.js — SERVER panel         │
 └───────────────┬──────────────────────────┘
                 │ fetch()
 ┌───────────────▼──────────────────────────┐
@@ -40,7 +41,7 @@ the Settings panel. Add `BRAIN_BASE`/`BRAIN_KEY` to `.env` and the model brain
 is wired up too, with the key staying on the server.
 
 ```bash
-npm test                  # 45 tests, no network required
+npm test                  # 53 tests, no network required
 npm run dev               # restart on change
 ```
 
@@ -81,8 +82,10 @@ An OpenAI-compatible pass-through to whatever you configure in `BRAIN_BASE`
 (OpenRouter, OpenAI, Groq, a local Ollama). Streaming and tool-calling pass
 through untouched, so point the desk's BASE URL at
 `http://localhost:8787/api/v1`, leave its API-key box empty, and the credential
-never reaches the browser. `GET /api/brain/probe` answers whether the upstream
-is actually reachable.
+never reaches the browser. `POST /api/v1/embeddings` is proxied too, so the
+desk's semantic recall embeds through the real model instead of falling back to
+its local approximation. `GET /api/brain/probe` answers whether the upstream is
+actually reachable.
 
 ### Alerts — `POST /api/notify`
 
@@ -156,6 +159,23 @@ PUT    /api/autonomy/watchlist        {"symbols":["NVDA","AAPL"]}
 POST   /api/research                  ad-hoc research, no goal needed
 ```
 
+### The SERVER panel
+
+`public/desk-server.js` adds a **SERVER** button to the desk (bottom-left, clear
+of the drawer) that opens a panel onto the runtime: loop status, the goals armed
+server-side with toggle/run-now/disarm, a live activity feed, a form for arming
+new goals, and one-click genome sync in both directions.
+
+It lives outside `index.html` on purpose. The desk is authored elsewhere and
+re-uploaded whole, so anything written into it would be overwritten on the next
+revision — a companion file survives that. It also stays inert: if `/api/config`
+does not answer, the button never appears, so opening the HTML straight from
+disk behaves exactly as before.
+
+Arming a goal from the panel goes through the same validation as the API, so a
+condition the server cannot evaluate is refused inline with the reason rather
+than accepted and silently never fired.
+
 ### Moving a brain between runtimes
 
 The desk exports its whole state as a genome (`REPLICATE` in the UI). The
@@ -169,6 +189,10 @@ curl localhost:8787/api/genome > genome.json # server state, importable by the U
 
 Goals the server cannot run — browser-only actions like opening a tab — come
 back in `skipped` with a reason rather than disappearing.
+
+The format is genome **v5**. Fields the server does not act on — `portfolio`
+positions and the `consensus` toggle — are stored verbatim and handed back
+unchanged, so a push followed by a pull never quietly loses them.
 
 ## Indicators
 
@@ -198,6 +222,7 @@ Every knob lives in `.env.example` with a comment. The ones that matter:
 
 ```
 public/index.html      the desk, exactly as authored
+public/desk-server.js  SERVER panel: runtime status, goals, activity, sync
 src/server.js          boot, graceful shutdown
 src/app.js             routes, CORS, error handling
 src/ui.js              serves the desk with first-run defaults injected
@@ -206,7 +231,7 @@ src/routes/            fetch · notify · yahoo · brain · autonomy · genome
 src/market/yahoo.js    feed with crumb handling and fallbacks
 src/autonomy/          store · conditions · actions · engine · research
 src/lib/               safeFetch · htmlText · indicators · notify · rateLimit
-test/                  45 tests, no network required
+test/                  53 tests, no network required
 ```
 
 ## Notes on behaviour

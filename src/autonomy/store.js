@@ -14,6 +14,9 @@ const EMPTY = {
   goals: [],
   workers: [],
   watchlist: [],
+  // Carried for genome fidelity; the desk, not the loop, acts on these.
+  portfolio: [],
+  consensus: false,
   activity: [],
   updated: null,
 };
@@ -27,7 +30,15 @@ function file() {
 
 function normalize(raw) {
   const s = { ...EMPTY, ...(raw && typeof raw === 'object' ? raw : {}) };
-  for (const key of ['memory', 'tasks', 'goals', 'workers', 'watchlist', 'activity']) {
+  for (const key of [
+    'memory',
+    'tasks',
+    'goals',
+    'workers',
+    'watchlist',
+    'portfolio',
+    'activity',
+  ]) {
     if (!Array.isArray(s[key])) s[key] = [];
   }
   return s;
