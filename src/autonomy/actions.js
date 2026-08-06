@@ -131,8 +131,15 @@ export async function executeAction(action, ctx = {}) {
       const delivery = await sendNotification(text);
       return {
         ok: true,
-        summary: text,
-        detail: { delivered: delivery.delivered, reason: delivery.reason || null },
+        // Report what was actually sent, not what was configured — with voice
+        // on, those differ, and the activity log should match the phone.
+        summary: delivery.message || text,
+        detail: {
+          delivered: delivery.delivered,
+          reason: delivery.reason || null,
+          voiced: delivery.voiced || null,
+          written: delivery.message === text ? null : text,
+        },
       };
     }
 

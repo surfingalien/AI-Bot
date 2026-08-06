@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'node:path';
-import { config, brainConfigured } from './config.js';
+import { config, brainConfigured, authRequired } from './config.js';
+import { authMiddleware } from './lib/auth.js';
 import { renderIndex } from './ui.js';
 import { fetchRouter } from './routes/fetch.js';
 import { notifyRouter } from './routes/notify.js';
@@ -41,7 +42,9 @@ export function createApp() {
   app.use(cors);
   app.use(express.json({ limit: '1mb' }));
 
+  // Health stays open so a load balancer never needs the secret.
   app.get('/api/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
+  app.use(authMiddleware);
 
   // Capability advertisement. Booleans only — no secret ever crosses this line.
   app.get('/api/config', (_req, res) => {
@@ -51,6 +54,8 @@ export function createApp() {
       notify: { configured: Boolean(config.notify.webhook) },
       market: { provider: 'yahoo', cacheMs: config.market.cacheMs },
       egress: { privateAllowed: config.fetch.allowPrivateEgress },
+      auth: { required: authRequired() },
+      voice: { alerts: config.notify.voice },
       autonomy: { enabled: config.autonomy.enabled, ...status() },
     });
   });

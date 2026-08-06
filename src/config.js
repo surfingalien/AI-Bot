@@ -47,6 +47,9 @@ export const config = {
     // A webhook supplied in the request body can point anywhere, so it is
     // opt-in rather than the default.
     allowRequestWebhook: bool(env.NOTIFY_ALLOW_REQUEST_WEBHOOK, false),
+    // Rewrite alerts into one readable line before sending. An alert is read
+    // on a phone, away from a screen, so a metric dump is wasted.
+    voice: bool(env.NOTIFY_VOICE, true),
   },
 
   // Upstream OpenAI-compatible endpoint. When a key is set here the browser
@@ -61,6 +64,8 @@ export const config = {
   },
 
   market: {
+    // Overridable for a mirror, an offline replay, or a test stub.
+    base: (env.YAHOO_BASE || 'https://query1.finance.yahoo.com').replace(/\/+$/, ''),
     chartRange: env.YAHOO_CHART_RANGE || '2y',
     chartInterval: env.YAHOO_CHART_INTERVAL || '1d',
     cacheMs: int(env.MARKET_CACHE_MS, 60000),
@@ -77,7 +82,19 @@ export const config = {
     windowMs: int(env.RATE_LIMIT_WINDOW_MS, 60000),
     max: int(env.RATE_LIMIT_MAX, 120),
   },
+
+  auth: {
+    // Unset means open, which is fine on loopback and nowhere else: anyone who
+    // can reach the port can arm goals and spend the model budget.
+    token: env.API_TOKEN || '',
+    cookieName: 'sa_token',
+    cookieMaxAgeSec: int(env.API_TOKEN_COOKIE_MAX_AGE, 30 * 24 * 3600),
+  },
 };
+
+export function authRequired() {
+  return Boolean(config.auth.token);
+}
 
 export function brainConfigured() {
   return Boolean(config.brain.base);

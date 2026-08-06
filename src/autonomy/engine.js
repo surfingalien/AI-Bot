@@ -7,7 +7,12 @@
 
 import { config } from '../config.js';
 import { getState, recordActivity, rid, saveState } from './store.js';
-import { conditionSymbols, evaluateCondition, parseCondition } from './conditions.js';
+import {
+  conditionSymbols,
+  evaluateCondition,
+  parseCondition,
+  rememberReadings,
+} from './conditions.js';
 import { executeAction, parseAction } from './actions.js';
 import { snapshot } from '../market/yahoo.js';
 import { log } from '../lib/log.js';
@@ -41,6 +46,12 @@ export function validateGoal(input = {}) {
       actionText,
       cadenceSec,
       enabled: input.enabled !== false,
+      // Fire on the transition into true rather than every tick it stays true.
+      // Default on for level conditions: repeating an alert for as long as a
+      // price sits above a line is the behaviour nobody wants.
+      edge: input.edge !== false,
+      held: false,
+      lastReading: {},
       lastRun: 0,
       lastFireDay: input.lastFireDay || '',
       runs: 0,
@@ -92,6 +103,10 @@ export function updateGoal(id, patch = {}) {
     goal.cadenceSec = Math.max(30, parseInt(patch.cadenceSec, 10) || goal.cadenceSec);
   }
   if (patch.enabled != null) goal.enabled = Boolean(patch.enabled);
+  if (patch.edge != null) {
+    goal.edge = Boolean(patch.edge);
+    goal.held = false; // changing the rule re-arms it
+  }
 
   saveState({ immediate: true });
   return goal;
@@ -161,12 +176,30 @@ export async function runGoal(goal, opts = {}) {
     if (symbols.length) await refreshFeed(symbols);
 
     const verdict = evaluateCondition(cond, { state, feed, now: new Date(), goal });
+    // Sample after evaluating, so a crossing compares this tick against the
+    // last one rather than against itself.
+    rememberReadings(cond, goal, feed);
+
     if (verdict !== true) {
       if (verdict === null) {
         log.debug(`goal ${goal.name}: condition undecidable (no feed for ${symbols.join(',')})`);
       }
+      // Leaving the true state re-arms an edge-triggered goal.
+      if (verdict === false) goal.held = false;
       return null;
     }
+
+    // Edge triggering: a level condition stays true for as long as the price
+    // stays there, so without this "price(NVDA) > 140" alerts on every tick
+    // for a week. Crossings are transitions already and need no help.
+    if (goal.edge && cond.kind !== 'cross') {
+      if (goal.held) {
+        log.debug(`goal ${goal.name}: still true, already fired on the edge`);
+        return null;
+      }
+      goal.held = true;
+    }
+
     if (cond.kind === 'time') goal.lastFireDay = new Date().toDateString();
   }
 

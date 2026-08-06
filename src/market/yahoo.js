@@ -14,8 +14,12 @@ import { FetchError, fetchText } from '../lib/safeFetch.js';
 import { computeIndicators } from '../lib/indicators.js';
 import { log } from '../lib/log.js';
 
-const BASE = 'https://query1.finance.yahoo.com';
 const CRUMB_TTL_MS = 30 * 60 * 1000;
+
+// Read through config so a mirror or a test stub can stand in for Yahoo.
+function base() {
+  return config.market.base;
+}
 
 let crumbCache = { cookie: '', crumb: '', ts: 0 };
 const responseCache = new Map(); // key -> { ts, value }
@@ -64,7 +68,7 @@ async function getCrumb() {
       const raw = seed.headers.getSetCookie?.() || [];
       cookie = raw.map((c) => c.split(';')[0]).join('; ');
     }
-    const crumbRes = await fetchText(`${BASE}/v1/test/getcrumb`, {
+    const crumbRes = await fetchText(`${base()}/v1/test/getcrumb`, {
       headers: cookie ? { Cookie: cookie } : {},
       maxRedirects: 1,
     });
@@ -104,7 +108,7 @@ export async function fetchChart(symbol, opts = {}) {
   const hit = cached(key);
   if (hit) return hit;
 
-  const url = `${BASE}/v8/finance/chart/${encodeURIComponent(sym)}?range=${encodeURIComponent(
+  const url = `${base()}/v8/finance/chart/${encodeURIComponent(sym)}?range=${encodeURIComponent(
     range,
   )}&interval=${encodeURIComponent(interval)}&includePrePost=false&events=div%2Csplit`;
   return store(key, await getJson(url));
@@ -197,7 +201,7 @@ export async function fetchQuote(symbol) {
   // 1. Native v7 quote.
   try {
     const j = await getJson(
-      `${BASE}/v7/finance/quote?symbols=${encodeURIComponent(sym)}`,
+      `${base()}/v7/finance/quote?symbols=${encodeURIComponent(sym)}`,
       { withCrumb: true },
     );
     if (j?.quoteResponse?.result?.length) return store(key, j);
@@ -209,7 +213,7 @@ export async function fetchQuote(symbol) {
   try {
     const modules = 'price,summaryDetail,defaultKeyStatistics,financialData,assetProfile';
     const j = await getJson(
-      `${BASE}/v10/finance/quoteSummary/${encodeURIComponent(sym)}?modules=${modules}`,
+      `${base()}/v10/finance/quoteSummary/${encodeURIComponent(sym)}?modules=${modules}`,
       { withCrumb: true },
     );
     const mapped = summaryToQuote(sym, j);

@@ -23,6 +23,7 @@ the tab is closed.
 │  /api/autonomy/*     goals that fire     │
 │  /api/genome         brain transfer      │
 │  /api/voice/brief    speech, not recital │
+│  /api/intent         English in, cmds out│
 └───────────────┬──────────────────────────┘
                 │
       web · Yahoo Finance · your LLM · Slack/Discord
@@ -42,7 +43,7 @@ the Settings panel. Add `BRAIN_BASE`/`BRAIN_KEY` to `.env` and the model brain
 is wired up too, with the key staying on the server.
 
 ```bash
-npm test                  # 73 tests, no network required
+npm test                  # 107 tests, no network required
 npm run dev               # restart on change
 ```
 
@@ -95,6 +96,18 @@ Forwards `{ text }` to `NOTIFY_WEBHOOK` in a body shaped for both Slack
 `NOTIFY_ALLOW_REQUEST_WEBHOOK=true`, since accepting them turns the server into
 an open relay.
 
+Alerts are rewritten before they are sent, because an alert is read on a phone,
+away from any screen, where a metric dump is wasted:
+
+```
+fired:  "ALERT: price(NVDA) > 140 | last=142.6234 | rsi=68.3129 | chg=+4.0121%"
+sent:   "NVDA broke 140, up about 4 percent since the open."
+```
+
+One sentence, under 25 words, the one number that matters. The activity log
+records what was actually sent rather than what was configured, so the log and
+the phone agree. `NOTIFY_VOICE=false` sends the raw text instead.
+
 ## The autonomy loop
 
 The browser's goals stop the moment the tab closes. The server runs the same
@@ -121,14 +134,24 @@ identically in either runtime:
 |---|---|
 | `always` | every cadence |
 | `at 09:30` | first tick at/after that local time, once per day |
-| `price(NVDA) > 140` | live price crosses the level |
+| `price(NVDA) > 140` | live price is above the level |
 | `rsi(AAPL) < 30` | RSI(14) below the level |
 | `chg(MSFT) <= -3` | 1-day change at/below the level |
 | `memory contains earnings` | durable memory matches |
 | `tasks open` | any imported task is still undone |
+| `price(NVDA) crosses above 140` | the level is crossed, not merely exceeded |
+| `rsi(AAPL) crosses below 30` | same, downward |
 
 A condition needing a symbol with no feed evaluates to *undecidable*, not
 false — the loop logs it and moves on instead of firing on missing data.
+
+**Firing on the edge.** A level condition stays true for as long as the price
+stays there, so `price(NVDA) > 140` would alert every tick for a week. Goals
+therefore fire on the transition into true and re-arm when it goes false again;
+pass `"edge": false` to get the old level-triggered behaviour. A crossing is a
+transition by definition — it compares this reading against the previous one,
+so the first sample after arming only establishes the baseline, and touching
+the level exactly is not yet a crossing.
 
 **Actions:**
 
@@ -208,6 +231,52 @@ a repeat costs nothing, and a stale rewrite is dropped rather than spoken after
 a newer answer. **VOICE: BRIEFING / VERBATIM** in the SERVER panel switches
 between the brief and the desk's original behaviour.
 
+### Speaking to it in English — `POST /api/intent`
+
+The desk routes spoken commands by keyword, so "how's my portfolio doing" hits
+nothing while "positions" works. Rather than teach the operator the syntax,
+translate: the model maps a transcript onto the command vocabulary the desk
+already has.
+
+```
+heard:  "how's my portfolio doing"     ran:  positions
+heard:  "tell me about nvidia data centers"
+                                       ran:  deep research the NVDA data-center market
+heard:  "what a lovely morning"        ran:  (passed through, unchanged)
+```
+
+Passing through is the important default — a wrong rewrite silently runs the
+wrong command, which is worse than no rewrite. So a transcript is only replaced
+when the model lands on a known verb; anything else, including an answer outside
+the vocabulary, goes through exactly as spoken. Text that is already a desk
+command is never sent to the model at all.
+
+The desk's recogniser accumulates its transcript in `onresult` and runs it in
+`onend`, both closure-scoped, so `desk-server.js` wraps the `SpeechRecognition`
+constructor: it holds the desk's own handlers, translates on the way through,
+and hands the result back in the shape the handler already expects. **INTENT
+ON/OFF** in the panel controls it, and the panel shows both what was heard and
+what was run.
+
+### Access control — `API_TOKEN`
+
+Off by default, because on loopback it buys nothing. Set it before this binds
+anywhere routable; the server warns at boot if it is listening off-loopback
+without one.
+
+```bash
+API_TOKEN=$(openssl rand -hex 24) npm start
+# then open the desk once:
+open "http://localhost:8787/?token=YOUR_TOKEN"
+```
+
+The desk is a page, not an API client, so a header alone would lock the operator
+out of their own UI. The token can arrive once in the URL, which is exchanged
+for an httpOnly cookie and stripped from the address bar — after that the
+browser authenticates itself and the token is not in the page source. API
+clients use `Authorization: Bearer` or `X-SA-Token`. `/api/health` stays open so
+a load balancer never needs the secret.
+
 ### Moving a brain between runtimes
 
 The desk exports its whole state as a genome (`REPLICATE` in the UI). The
@@ -237,6 +306,24 @@ a UI dossier therefore never disagree about the same symbol.
 None of this is financial advice — it is a transparent scoring rule, and the UI
 says so on every dossier.
 
+### Verifying the feed for real
+
+Yahoo's endpoints are unofficial: they rate-limit, gate on crumbs, and change
+shape without notice. The test suite pins everything on this side of that
+boundary — the parser against holiday gaps, the indicators for scale, and all
+three quote fallbacks — using a stub. What it cannot answer is whether Yahoo
+still replies the way it used to.
+
+```bash
+node scripts/verify-feed.js NVDA AAPL
+```
+
+That runs the real chain against the live endpoints and checks the results are
+plausible rather than merely present: RSI within 0–100, moving averages on the
+same scale as price, the quote agreeing with the last chart bar, and a signal
+carrying its reasons. It exits non-zero on failure, so it can gate a deploy.
+Run it on a machine with open egress before trusting a dossier's numbers.
+
 ## Configuration
 
 Every knob lives in `.env.example` with a comment. The ones that matter:
@@ -248,6 +335,9 @@ Every knob lives in `.env.example` with a comment. The ones that matter:
 | `NOTIFY_WEBHOOK` | empty | where alerts go |
 | `AUTONOMY_ENABLED` / `AUTONOMY_TICK_MS` | `true` / `30000` | loop on/off and how often it wakes |
 | `ALLOW_PRIVATE_EGRESS` | `false` | local dev against a private host |
+| `API_TOKEN` | empty | required before this binds anywhere routable |
+| `NOTIFY_VOICE` | `true` | rewrite alerts into one readable line |
+| `YAHOO_BASE` | Yahoo | a mirror, a replay, or a stub |
 | `CORS_ORIGINS` | empty | serving the HTML from another origin |
 
 ## Layout
@@ -262,8 +352,9 @@ src/config.js          env-driven configuration
 src/routes/            fetch · notify · yahoo · brain · autonomy · genome · voice
 src/market/yahoo.js    feed with crumb handling and fallbacks
 src/autonomy/          store · conditions · actions · engine · research
-src/lib/               safeFetch · htmlText · indicators · speech · notify · rateLimit
-test/                  73 tests, no network required
+src/lib/               safeFetch · auth · indicators · speech · voiceBrief · intent · notify
+scripts/verify-feed.js check the live Yahoo chain end to end
+test/                  107 tests, no network required
 ```
 
 ## Notes on behaviour

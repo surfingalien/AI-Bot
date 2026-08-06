@@ -123,24 +123,31 @@
    */
 
   var VOICE_KEY = 'sa_srv_voice';
+  var INTENT_KEY = 'sa_srv_intent';
   var voiceMode = 'brief'; // 'brief' | 'verbatim'
+  var intentMode = true;
+  var serverReady = false;
   var speakSeq = 0;
   var lastScript = null;
+  var lastIntent = null;
 
   function loadVoiceMode() {
     try {
       var v = localStorage.getItem(VOICE_KEY);
       if (v === 'verbatim' || v === 'brief') voiceMode = v;
+      var i = localStorage.getItem(INTENT_KEY);
+      if (i === 'off') intentMode = false;
     } catch (e) {
-      /* private mode — the default stands */
+      /* private mode — the defaults stand */
     }
   }
 
   function saveVoiceMode() {
     try {
       localStorage.setItem(VOICE_KEY, voiceMode);
+      localStorage.setItem(INTENT_KEY, intentMode ? 'on' : 'off');
     } catch (e) {
-      /* nothing to do; the mode still applies for this session */
+      /* nothing to do; the modes still apply for this session */
     }
   }
 
@@ -152,7 +159,7 @@
 
     synth.speak = function (utterance) {
       var text = utterance && utterance.text ? String(utterance.text) : '';
-      if (voiceMode === 'verbatim' || !text) return original(utterance);
+      if (!serverReady || voiceMode === 'verbatim' || !text) return original(utterance);
 
       // Claim a ticket. If the desk starts saying something newer while the
       // rewrite is in flight, the stale one is dropped rather than queued —
@@ -195,14 +202,133 @@
     }
   }
 
+  /* ---------- voice in ----------
+   *
+   * The desk's recogniser accumulates a transcript in onresult and runs it in
+   * onend, both closure-scoped. Wrapping the SpeechRecognition constructor
+   * gets between them: we hold the desk's own handlers, translate the
+   * transcript on the way through, and hand it back in the shape its handler
+   * already expects. It hears a command; the operator spoke English.
+   */
+  function installIntent() {
+    var Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Ctor || window.__saIntentPatched) return;
+    window.__saIntentPatched = true;
+
+    function Wrapped() {
+      var rec = new Ctor();
+      var deskResult = null;
+      var deskEnd = null;
+      var heard = '';
+
+      rec.addEventListener('result', function (e) {
+        // Track the final transcript ourselves; the desk's copy is rebuilt
+        // from the event we synthesise later.
+        for (var i = e.resultIndex; i < e.results.length; i++) {
+          if (e.results[i].isFinal) heard += e.results[i][0].transcript;
+        }
+      });
+
+      Object.defineProperty(rec, 'onresult', {
+        configurable: true,
+        get: function () {
+          return deskResult;
+        },
+        set: function (fn) {
+          deskResult = fn;
+          // Live interim text still reaches the desk untouched, so the caption
+          // keeps updating while someone is still talking.
+          rec.addEventListener('result', function (e) {
+            if (deskResult) deskResult(e);
+          });
+        },
+      });
+
+      Object.defineProperty(rec, 'onend', {
+        configurable: true,
+        get: function () {
+          return deskEnd;
+        },
+        set: function (fn) {
+          deskEnd = fn;
+          rec.addEventListener('end', function () {
+            var said = heard.trim();
+            heard = '';
+            if (!serverReady || !intentMode || !said) {
+              if (deskEnd) deskEnd();
+              return;
+            }
+            var brief = document.getElementById('brief');
+            if (brief) brief.textContent = 'understanding…';
+
+            api('/api/intent', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ transcript: said }),
+            })
+              .then(function (res) {
+                var out = res.json && res.json.ok ? res.json : null;
+                deliver(out && out.command ? out.command : said, said, out);
+              })
+              .catch(function () {
+                deliver(said, said, null);
+              });
+          });
+        },
+      });
+
+      // Replay the (possibly rewritten) transcript through the desk's own
+      // handler, so its bookkeeping runs exactly as it would have.
+      function deliver(command, said, meta) {
+        lastIntent = {
+          said: said,
+          command: command,
+          rewritten: Boolean(meta && meta.rewritten),
+          source: (meta && meta.source) || 'passthrough',
+        };
+        renderVoice();
+        if (deskResult) {
+          deskResult({
+            resultIndex: 0,
+            results: (function () {
+              var alt = { transcript: command, confidence: 1 };
+              var entry = [alt];
+              entry.isFinal = true;
+              var list = [entry];
+              list.length = 1;
+              return list;
+            })(),
+          });
+        }
+        if (deskEnd) deskEnd();
+      }
+
+      return rec;
+    }
+
+    window.SpeechRecognition = Wrapped;
+    window.webkitSpeechRecognition = Wrapped;
+  }
+
   function renderVoice() {
     if (!refs.voiceMode) return;
     refs.voiceMode.textContent = voiceMode === 'brief' ? 'BRIEFING' : 'VERBATIM';
     refs.voiceMode.className = 'sasrv-go' + (voiceMode === 'brief' ? '' : ' gh');
+    if (refs.intentMode) {
+      refs.intentMode.textContent = intentMode ? 'INTENT ON' : 'INTENT OFF';
+      refs.intentMode.className = 'sasrv-go' + (intentMode ? '' : ' gh');
+    }
     if (refs.voiceLast) {
       refs.voiceLast.textContent = lastScript
         ? '“' + lastScript.text + '” — ' + lastScript.source
         : 'Nothing spoken yet. The desk speaks when SPEAK is on in its settings.';
+    }
+    if (refs.intentLast) {
+      refs.intentLast.textContent = lastIntent
+        ? lastIntent.rewritten
+          ? 'heard “' + lastIntent.said + '” → ran “' + lastIntent.command + '”'
+          : 'heard “' + lastIntent.said + '” → passed through (' + lastIntent.source + ')'
+        : 'Nothing heard yet. Hold SPACE and speak.';
     }
   }
 
@@ -570,6 +696,26 @@
       ),
     );
 
+    var intentRow = el('div', 'sasrv-pair');
+    refs.intentMode = el('button', 'sasrv-go', 'INTENT ON');
+    refs.intentMode.onclick = function () {
+      intentMode = !intentMode;
+      saveVoiceMode();
+      renderVoice();
+      say('spoken intent: ' + (intentMode ? 'on' : 'off'), 'ok');
+    };
+    intentRow.appendChild(refs.intentMode);
+    body.appendChild(intentRow);
+    refs.intentLast = el('div', 'sasrv-note');
+    body.appendChild(refs.intentLast);
+    body.appendChild(
+      el(
+        'div',
+        'sasrv-note',
+        'With intent on, “how is my portfolio doing” becomes “positions” before the desk sees it. Anything that does not map to a command it knows is passed through exactly as spoken.',
+      ),
+    );
+
     body.appendChild(el('div', 'sasrv-h', 'activity'));
     refs.activity = el('div');
     body.appendChild(refs.activity);
@@ -638,17 +784,25 @@
 
   function boot() {
     // Silence is the right outcome when the desk is opened from disk or the
-    // server is down: the panel simply never appears.
+    // server is down: the panel never appears, and both patches stay dormant
+    // because serverReady is never set.
     api('/api/config')
       .then(function (res) {
         if (res.status !== 200 || !res.json || !res.json.ok) return;
-        loadVoiceMode();
-        // Patch before mounting: the desk can speak the moment it boots.
-        installVoice();
+        serverReady = true;
         mount(res.json);
       })
       .catch(function () {});
   }
+
+  // Installed synchronously, before the engine runs. The desk captures the
+  // SpeechRecognition constructor into a local the moment it boots, so a patch
+  // that waited for the config round trip would lose the race and leave voice
+  // input untouched. Both patches check serverReady at call time instead, so
+  // installing early changes nothing until there is a server to talk to.
+  loadVoiceMode();
+  installVoice();
+  installIntent();
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();

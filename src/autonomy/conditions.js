@@ -11,6 +11,8 @@
 //   tasks open
 
 const METRIC_RE = /^(price|rsi|chg)\(([A-Za-z0-9.\-=^$]+)\)\s*(>=|<=|==|=|>|<)\s*(-?\d+(?:\.\d+)?)$/i;
+const CROSS_RE =
+  /^(price|rsi|chg)\(([A-Za-z0-9.\-=^$]+)\)\s+crosses\s+(above|below)\s+(-?\d+(?:\.\d+)?)$/i;
 const TIME_RE = /^at\s+(\d{1,2}):(\d{2})$/i;
 const MEMORY_RE = /^memory\s+contains\s+(.+)$/i;
 
@@ -32,6 +34,19 @@ export function parseCondition(text) {
 
   if (/^tasks?\s+open$/i.test(t)) return { kind: 'tasksOpen' };
 
+  // Checked before the plain threshold form so "crosses above" is never read
+  // as a malformed comparison.
+  const cross = t.match(CROSS_RE);
+  if (cross) {
+    return {
+      kind: 'cross',
+      metric: cross[1].toLowerCase(),
+      symbol: cross[2].toUpperCase().replace(/^\$/, ''),
+      direction: cross[3].toLowerCase(),
+      value: Number(cross[4]),
+    };
+  }
+
   const metric = t.match(METRIC_RE);
   if (metric) {
     return {
@@ -47,6 +62,13 @@ export function parseCondition(text) {
 }
 
 /** Symbols a condition needs live data for. */
+export function metricValue(metric, indicators) {
+  if (!indicators) return null;
+  if (metric === 'price') return indicators.last ?? null;
+  if (metric === 'rsi') return indicators.rsi ?? null;
+  return indicators.chgPct ?? null;
+}
+
 export function conditionSymbols(text) {
   const out = [];
   const re = /(price|rsi|chg)\(([A-Za-z0-9.\-=^$]+)\)/gi;
@@ -106,16 +128,39 @@ export function evaluateCondition(cond, ctx = {}) {
     }
 
     case 'metric': {
-      const snap = feed[cond.symbol];
-      const ind = snap?.indicators;
-      if (!ind) return null;
-      const have =
-        cond.metric === 'price' ? ind.last : cond.metric === 'rsi' ? ind.rsi : ind.chgPct;
+      const have = metricValue(cond.metric, feed[cond.symbol]?.indicators);
       if (have == null) return null;
       return compare(have, cond.op, cond.value);
+    }
+
+    case 'cross': {
+      const have = metricValue(cond.metric, feed[cond.symbol]?.indicators);
+      if (have == null) return null;
+
+      // A crossing is a transition, so it needs the previous reading. The
+      // first sample only establishes the baseline — nothing has crossed yet.
+      const previous = goal.lastReading?.[cond.symbol]?.[cond.metric];
+      if (previous == null) return null;
+
+      return cond.direction === 'above'
+        ? previous <= cond.value && have > cond.value
+        : previous >= cond.value && have < cond.value;
     }
 
     default:
       return null;
   }
+}
+
+/**
+ * Record the readings a crossing condition will compare against next tick.
+ * Kept beside evaluation so the two never disagree about what "previous" means.
+ */
+export function rememberReadings(cond, goal, feed) {
+  if (!cond || (cond.kind !== 'cross' && cond.kind !== 'metric')) return;
+  const have = metricValue(cond.metric, feed[cond.symbol]?.indicators);
+  if (have == null) return;
+  if (!goal.lastReading) goal.lastReading = {};
+  if (!goal.lastReading[cond.symbol]) goal.lastReading[cond.symbol] = {};
+  goal.lastReading[cond.symbol][cond.metric] = have;
 }

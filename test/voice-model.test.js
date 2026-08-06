@@ -34,7 +34,7 @@ process.env.BRAIN_KEY = 'test-key-should-not-leak';
 process.env.BRAIN_MODEL = 'stub-model';
 
 const { createApp } = await import('../src/app.js');
-const { clearVoiceCache } = await import('../src/routes/voice.js');
+const { clearVoiceCache } = await import('../src/lib/voiceBrief.js');
 
 const server = createApp().listen(0);
 await new Promise((r) => server.once('listening', r));

@@ -52,6 +52,7 @@ test('the panel talks to the server only through documented endpoints', () => {
     '/api/autonomy/goals',
     '/api/genome',
     '/api/voice/brief',
+    '/api/intent',
   ]);
   for (const call of calls) {
     const base = call.replace(/\/api\/autonomy\/goals\/.*$/, '/api/autonomy/goals');
@@ -60,16 +61,23 @@ test('the panel talks to the server only through documented endpoints', () => {
 });
 
 test('the panel stays inert when the server does not answer', () => {
-  // Nothing mounts and no speech is intercepted unless /api/config confirms a
-  // server, and a failed probe is swallowed rather than logged at the operator.
   const boot = panel.slice(panel.indexOf('function boot()'));
+  // Nothing mounts unless /api/config confirms a server, and a failed probe is
+  // swallowed rather than logged at the operator.
   assert.match(boot, /if \(res\.status !== 200 \|\| !res\.json \|\| !res\.json\.ok\) return;/);
-  assert.ok(
-    boot.indexOf('return;') < boot.indexOf('installVoice()'),
-    'voice patching must sit behind the server check',
-  );
-  assert.ok(boot.indexOf('installVoice()') < boot.indexOf('mount('), 'patch before first speech');
+  assert.ok(boot.indexOf('return;') < boot.indexOf('mount('), 'mount sits behind the check');
   assert.match(boot, /\.catch\(function \(\) \{\}\)/);
+
+  // Both patches install synchronously — the desk captures the recognition
+  // constructor at boot, so a patch waiting on the config round trip would
+  // lose the race. They stay dormant via serverReady instead.
+  assert.ok(boot.indexOf('installVoice()') > 0 && boot.indexOf('installIntent()') > 0);
+  assert.ok(
+    boot.indexOf('installVoice()') < boot.indexOf("addEventListener('DOMContentLoaded', boot)"),
+    'patches install before the engine runs',
+  );
+  assert.match(panel, /if \(!serverReady \|\| voiceMode === 'verbatim' \|\| !text\)/);
+  assert.match(panel, /if \(!serverReady \|\| !intentMode \|\| !said\)/);
 });
 
 test('speech interception restores the desk behaviour when the rewrite fails', () => {
