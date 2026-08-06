@@ -53,6 +53,7 @@ test('the panel talks to the server only through documented endpoints', () => {
     '/api/genome',
     '/api/voice/brief',
     '/api/intent',
+    '/api/diagnostics',
   ]);
   for (const call of calls) {
     const base = call.replace(/\/api\/autonomy\/goals\/.*$/, '/api/autonomy/goals');

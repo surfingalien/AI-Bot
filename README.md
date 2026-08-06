@@ -24,6 +24,8 @@ the tab is closed.
 │  /api/genome         brain transfer      │
 │  /api/voice/brief    speech, not recital │
 │  /api/intent         English in, cmds out│
+│  /api/portfolio      positions priced now│
+│  /api/diagnostics    where the time goes │
 └───────────────┬──────────────────────────┘
                 │
       web · Yahoo Finance · your LLM · Slack/Discord
@@ -43,7 +45,7 @@ the Settings panel. Add `BRAIN_BASE`/`BRAIN_KEY` to `.env` and the model brain
 is wired up too, with the key staying on the server.
 
 ```bash
-npm test                  # 107 tests, no network required
+npm test                  # 118 tests, no network required
 npm run dev               # restart on change
 ```
 
@@ -162,6 +164,7 @@ the level exactly is not yet a crossing.
 | `remember k = v` | write durable memory |
 | `scan watchlist` | refresh every watched symbol, emit a signal table |
 | `research <topic>` | run deep research, emit the cited brief |
+| `portfolio` | value every position and report P&L |
 | `digest` | summarize armed goals and recent activity |
 | `log <text>` | activity log only, no outbound push |
 
@@ -277,6 +280,73 @@ browser authenticates itself and the token is not in the page source. API
 clients use `Authorization: Bearer` or `X-SA-Token`. `/api/health` stays open so
 a load balancer never needs the secret.
 
+### Portfolio — `GET /api/portfolio`
+
+The desk holds positions but can only price them while a tab is open. Valuing
+them here means the number survives the browser, the loop can report P&L on a
+schedule (`portfolio` action), and "how's my portfolio doing" has a real answer.
+
+```bash
+curl -X PUT localhost:8787/api/portfolio -H 'Content-Type: application/json' \
+  -d '{"positions":[{"sym":"NVDA","shares":10,"cost":118.40}]}'
+curl 'localhost:8787/api/portfolio?markdown=1'
+```
+
+Each position is priced independently, so one unreachable symbol costs that row
+rather than the whole valuation. Anything that could not be priced is listed in
+`incomplete` and **excluded from the totals** rather than silently counted as
+zero — a partial valuation that looks complete is worse than no valuation.
+
+### Why it used to feel slow
+
+The honest answer was the market feed, and it was bad: **a single quote cost
+about nine seconds whenever Yahoo was gating us, and nothing remembered that**.
+Every call re-walked the crumb handshake, then v7, then quoteSummary, then the
+chart — each one waiting out a full timeout — so a three-ticker dossier paid it
+three times over.
+
+Four fixes, measured against an unresponsive upstream:
+
+| | before | after |
+|---|---|---|
+| first quote | 9.1s | 9.1s |
+| same symbol again | 9.0s | 0.0s |
+| a second symbol | 9.0s | 0.0s |
+| a third symbol | 9.0s | 0.0s |
+
+- **A shorter timeout for market calls** (6s, not the generic 15s) and a budget
+  for the whole fallback ladder, so one call cannot stack three timeouts.
+- **Remembering which rung answered** per symbol, so a working quote does not
+  pay for the failing rungs above it.
+- **Remembering failures** for 30s, so the next caller does not wait out the
+  same dead endpoints.
+- **A circuit breaker**: several symbols failing in a row means the upstream is
+  down, not the symbols, so everything fails fast until it recovers. The panel's
+  FEED tile shows this, with the countdown to the next attempt.
+
+Two more things that were on the critical path:
+
+- **Spoken commands** no longer wait on a model for everyday phrasings.
+  "how's my portfolio doing", "scan the watchlist", "tell me about nvidia" and
+  friends resolve from local patterns in microseconds; the model is consulted
+  only for what those cannot place.
+- **Speech has a deadline** (`VOICE_DEADLINE_MS`, 2.5s). Past it the plainer
+  rules script is spoken rather than leaving a silence, and the model's version
+  still lands in the cache for next time.
+
+Finally, slowness is now *attributable* rather than a feeling:
+
+```bash
+curl localhost:8787/api/diagnostics    # times each hop separately
+```
+
+Every response also carries a `Server-Timing` header, and anything past
+`SLOW_REQUEST_MS` is logged with the path that caused it. The SERVER panel has a
+**DIAGNOSE** button that shows the same breakdown.
+
+If the feed is simply unreachable from where you run this, the first call still
+costs one timeout — that is the price of finding out — but only the first.
+
 ### Moving a brain between runtimes
 
 The desk exports its whole state as a genome (`REPLICATE` in the UI). The
@@ -352,9 +422,10 @@ src/config.js          env-driven configuration
 src/routes/            fetch · notify · yahoo · brain · autonomy · genome · voice
 src/market/yahoo.js    feed with crumb handling and fallbacks
 src/autonomy/          store · conditions · actions · engine · research
-src/lib/               safeFetch · auth · indicators · speech · voiceBrief · intent · notify
+src/lib/               safeFetch · auth · indicators · speech · voiceBrief · intent
+                       portfolio · notify · rateLimit
 scripts/verify-feed.js check the live Yahoo chain end to end
-test/                  107 tests, no network required
+test/                  118 tests, no network required
 ```
 
 ## Notes on behaviour

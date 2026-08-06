@@ -499,7 +499,15 @@
       ),
     );
     box.appendChild(cell('next goal', secs(au.nextGoalInSec)));
-    box.appendChild(cell('ticks', String(au.ticks || 0)));
+    // The feed is the usual reason a dossier feels slow, so it earns a tile.
+    var mk = cfg.market || {};
+    box.appendChild(
+      cell(
+        'feed',
+        mk.breakerOpen ? 'DOWN ' + mk.reopensInSec + 's' : 'OK',
+        mk.breakerOpen ? 'off' : 'ok',
+      ),
+    );
 
     if (refs.launcherDot) {
       refs.launcherDot.style.background = au.running ? 'var(--ok,#46e0a0)' : 'var(--amber,#f5c451)';
@@ -719,6 +727,35 @@
     body.appendChild(el('div', 'sasrv-h', 'activity'));
     refs.activity = el('div');
     body.appendChild(refs.activity);
+
+    body.appendChild(el('div', 'sasrv-h', 'where the time goes'));
+    var diagRow = el('div', 'sasrv-pair');
+    var diag = el('button', 'sasrv-go gh', 'DIAGNOSE');
+    diag.onclick = function () {
+      diag.textContent = 'timing…';
+      refs.diagOut.textContent = '';
+      api('/api/diagnostics').then(function (res) {
+        diag.textContent = 'DIAGNOSE';
+        var j = res.json;
+        if (!j || !j.ok) {
+          refs.diagOut.textContent = 'diagnostics unavailable';
+          return;
+        }
+        refs.diagOut.textContent =
+          j.stages
+            .map(function (s) {
+              return s.name + ': ' + s.ms + 'ms' + (s.ok ? '' : ' — ' + (s.error || 'failed'));
+            })
+            .join('\n') +
+          '\ntotal ' + j.totalMs + 'ms' +
+          (j.hint ? '\n' + j.hint : '');
+      });
+    };
+    diagRow.appendChild(diag);
+    body.appendChild(diagRow);
+    refs.diagOut = el('div', 'sasrv-note');
+    refs.diagOut.style.whiteSpace = 'pre-line';
+    body.appendChild(refs.diagOut);
 
     body.appendChild(el('div', 'sasrv-h', 'genome sync'));
     var pair = el('div', 'sasrv-pair');

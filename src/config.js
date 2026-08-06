@@ -24,6 +24,8 @@ export const config = {
   port: int(env.PORT, 8787),
   host: env.HOST || '0.0.0.0',
   logLevel: env.LOG_LEVEL || 'info',
+  // Anything past this is logged with its path, so slowness is attributable.
+  slowRequestMs: int(env.SLOW_REQUEST_MS, 2000),
 
   // Browsers hitting the API from another origin (e.g. the HTML opened from
   // disk). Requests without an Origin header are always allowed.
@@ -69,6 +71,20 @@ export const config = {
     chartRange: env.YAHOO_CHART_RANGE || '2y',
     chartInterval: env.YAHOO_CHART_INTERVAL || '1d',
     cacheMs: int(env.MARKET_CACHE_MS, 60000),
+    // Much shorter than the generic fetch timeout: a quote is on the critical
+    // path of a question someone is waiting on, and the ladder has fallbacks.
+    timeoutMs: int(env.MARKET_TIMEOUT_MS, 6000),
+    // Budget for the whole quote fallback ladder, so a first call cannot stack
+    // three timeouts back to back.
+    quoteBudgetMs: int(env.MARKET_QUOTE_BUDGET_MS, 9000),
+    // How long a symbol whose whole ladder failed is answered fast instead of
+    // making the next caller wait out the same dead endpoints.
+    failureTtlMs: int(env.MARKET_FAILURE_TTL_MS, 30000),
+    // Consecutive ladder failures before the feed is treated as down.
+    breakerThreshold: int(env.MARKET_BREAKER_THRESHOLD, 2),
+    breakerMs: int(env.MARKET_BREAKER_MS, 30000),
+    // Keeps watchlist symbols warm so the first dossier is not the slow one.
+    warmMs: int(env.MARKET_WARM_MS, 300000),
   },
 
   autonomy: {
@@ -81,6 +97,12 @@ export const config = {
   rateLimit: {
     windowMs: int(env.RATE_LIMIT_WINDOW_MS, 60000),
     max: int(env.RATE_LIMIT_MAX, 120),
+  },
+
+  voice: {
+    // How long speech may wait on the model before the rules script is spoken
+    // instead. Silence while a brief is written is worse than a plainer brief.
+    deadlineMs: int(env.VOICE_DEADLINE_MS, 2500),
   },
 
   auth: {

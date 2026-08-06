@@ -7,6 +7,7 @@
 //   alert <text>             same, flagged as an alert
 //   remember key = value     write to durable memory
 //   scan watchlist           refresh every watched symbol, emit a signal table
+//   portfolio                value every position and report P&L
 //   research <topic>         run deep research, emit the cited brief
 //   digest                   one-line summary of open goals and recent activity
 //   log <text>               activity-log only, no outbound push
@@ -16,6 +17,7 @@ import { snapshot } from '../market/yahoo.js';
 import { deepResearch } from './research.js';
 import { sendNotification } from '../lib/notify.js';
 import { localSignal } from '../lib/indicators.js';
+import { portfolioMarkdown, valuePortfolio } from '../lib/portfolio.js';
 import { log } from '../lib/log.js';
 
 export function parseAction(text) {
@@ -29,6 +31,7 @@ export function parseAction(text) {
     return { kind: 'remember', key: m[1].trim(), value: m[2].trim() };
   }
   if (/^scan\s+watchlist$/i.test(a)) return { kind: 'scan' };
+  if (/^portfolio$/i.test(a)) return { kind: 'portfolio' };
   if ((m = a.match(/^research\s+(.+)$/i))) return { kind: 'research', topic: m[1].trim() };
   if (/^digest$/i.test(a)) return { kind: 'digest' };
   if ((m = a.match(/^log\s+(.+)$/i))) return { kind: 'log', text: m[1] };
@@ -153,6 +156,23 @@ export async function executeAction(action, ctx = {}) {
 
     case 'scan':
       return runScan();
+
+    case 'portfolio': {
+      const valuation = await valuePortfolio();
+      if (!valuation.positions.length) {
+        return { ok: false, summary: 'no positions recorded', detail: null };
+      }
+      const t = valuation.totals;
+      const summary =
+        `portfolio $${t.value} · P&L ${t.pnl >= 0 ? '+' : ''}${t.pnl} (${t.pnlPct}%)` +
+        (t.dayChange != null ? ` · today ${t.dayChange >= 0 ? '+' : ''}${t.dayChange}` : '') +
+        (valuation.incomplete.length ? ` · ${valuation.incomplete.length} unpriced` : '');
+      return {
+        ok: true,
+        summary,
+        detail: { markdown: portfolioMarkdown(valuation), ...valuation },
+      };
+    }
 
     case 'digest':
       return runDigest();

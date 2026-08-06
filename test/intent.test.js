@@ -62,11 +62,41 @@ test.after(() => {
   fs.rmSync(stateDir, { recursive: true, force: true });
 });
 
-test('natural speech becomes a command the desk understands', async () => {
-  modelReply = 'positions';
-  const res = await resolveIntent("how's my portfolio doing");
+test('everyday phrasings resolve locally, with no model round trip', async () => {
+  const before = asked.length;
 
-  assert.equal(res.command, 'positions');
+  for (const [said, expected] of [
+    ["how's my portfolio doing", 'positions'],
+    ['show me my holdings', 'positions'],
+    ['scan the watchlist', 'scan watchlist'],
+    ['give me the weekly report', 'weekly report'],
+    ['catch me up', 'audio brief'],
+    ['tell me about nvidia', 'full equity dossier on NVDA'],
+    ['compare apple vs microsoft', 'compare AAPL vs MSFT'],
+    ['please remember that the board meets first Mondays', 'remember the board meets first Mondays'],
+    ['add a task to review the NVDA thesis', 'add task review the NVDA thesis'],
+  ]) {
+    const res = await resolveIntent(said);
+    assert.equal(res.command, expected, said);
+    assert.equal(res.source, 'fast-path', said);
+  }
+
+  assert.equal(asked.length, before, 'the fast path costs no model latency');
+});
+
+test('a phrase that is already a valid command keeps its own wording', async () => {
+  // "remember that X" is a working command; normalising it would be churn, and
+  // leaving valid commands alone is the conservative default.
+  const res = await resolveIntent('remember that the board meets first Mondays');
+  assert.equal(res.command, 'remember that the board meets first Mondays');
+  assert.equal(res.rewritten, false);
+});
+
+test('a request the fast path cannot place goes to the model', async () => {
+  modelReply = 'deep research the NVDA data-center market';
+  const res = await resolveIntent('what is going on with data center demand');
+
+  assert.equal(res.command, 'deep research the NVDA data-center market');
   assert.equal(res.rewritten, true);
   assert.equal(res.source, 'model');
   // The vocabulary travels with the request; the model is not left guessing.
@@ -74,12 +104,30 @@ test('natural speech becomes a command the desk understands', async () => {
   assert.match(asked.at(-1).messages[0].content, /answer exactly: PASS/);
 });
 
+test('a qualified subject is not flattened into a bare dossier', async () => {
+  // "tell me about nvidia" is a dossier; adding a subject makes it research,
+  // and the fast path must not silently drop the subject.
+  modelReply = 'deep research the NVDA data-center market';
+  const res = await resolveIntent('tell me about nvidia data centers');
+
+  assert.equal(res.source, 'model');
+  assert.notEqual(res.command, 'full equity dossier on NVDA');
+});
+
 test('something already in the desk language is never touched', async () => {
   const before = asked.length;
-  const res = await resolveIntent('full equity dossier on NVDA');
 
-  assert.equal(res.rewritten, false);
-  assert.equal(res.source, 'already-command');
+  for (const command of [
+    'full equity dossier on NVDA',
+    'positions',
+    'scan watchlist',
+    '@chief brief me',
+  ]) {
+    const res = await resolveIntent(command);
+    assert.equal(res.command, command, command);
+    assert.equal(res.rewritten, false, command);
+  }
+
   assert.equal(asked.length, before, 'no model call for a working command');
 });
 
@@ -103,17 +151,16 @@ test('an off-vocabulary answer is refused rather than run', async () => {
 });
 
 test('the endpoint reports what it heard alongside what it will run', async () => {
-  modelReply = 'deep research the NVDA data-center market';
   const res = await fetch(`${base}/api/intent`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ transcript: 'tell me about nvidia data centers' }),
+    body: JSON.stringify({ transcript: "how's my portfolio doing" }),
   });
   const json = await res.json();
 
   assert.equal(json.ok, true);
-  assert.equal(json.transcript, 'tell me about nvidia data centers');
-  assert.equal(json.command, 'deep research the NVDA data-center market');
+  assert.equal(json.transcript, "how's my portfolio doing");
+  assert.equal(json.command, 'positions');
   assert.equal(json.rewritten, true);
 });
 

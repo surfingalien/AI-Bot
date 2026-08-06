@@ -7,7 +7,7 @@
 // answer — so it is one implementation, not two.
 
 import crypto from 'node:crypto';
-import { brainConfigured } from '../config.js';
+import { config, brainConfigured } from '../config.js';
 import { complete } from '../brain/client.js';
 import { needsRewrite, toSpeech } from './speech.js';
 import { log } from './log.js';
@@ -94,22 +94,39 @@ export async function briefFor(text, options = {}) {
   if (!brainConfigured()) return remember({ script: fallback, source: 'rules' });
 
   try {
-    const raw = await complete(
-      [
-        { role: 'system', content: style === 'alert' ? ALERT_PROMPT : VOICE_PROMPT },
-        {
-          role: 'user',
-          content: `${title ? `Subject: ${title}\n\n` : ''}Written analysis:\n${input.slice(0, 6000)}`,
-        },
-      ],
-      { temperature: 0.4, maxTokens: style === 'alert' ? 80 : 160 },
-    );
-
-    // A model that ignores the brief and answers in markdown would defeat it.
-    const cleaned = toSpeech(raw);
-    return remember({ script: cleaned || fallback, source: 'model' });
+    // Waiting on the model is the whole latency budget for speech. Past the
+    // deadline, say the rules version rather than leaving a silence — the
+    // model's answer still lands in the cache and wins next time.
+    const raced = await Promise.race([
+      modelBrief(input, title, style),
+      new Promise((resolve) => {
+        const t = setTimeout(() => resolve(null), config.voice.deadlineMs);
+        if (t.unref) t.unref();
+      }),
+    ]);
+    if (raced === null) {
+      log.debug('voice brief exceeded its deadline, speaking the rules script');
+      return { script: fallback, source: 'rules-timeout' };
+    }
+    return remember({ script: raced || fallback, source: 'model' });
   } catch (err) {
     log.warn(`voice brief fell back to rules: ${err?.message || err}`);
     return remember({ script: fallback, source: 'rules' });
   }
+}
+
+async function modelBrief(input, title, style) {
+  const raw = await complete(
+    [
+      { role: 'system', content: style === 'alert' ? ALERT_PROMPT : VOICE_PROMPT },
+      {
+        role: 'user',
+        content: `${title ? `Subject: ${title}\n\n` : ''}Written analysis:\n${input.slice(0, 6000)}`,
+      },
+    ],
+    { temperature: 0.4, maxTokens: style === 'alert' ? 80 : 160 },
+  );
+
+  // A model that ignores the brief and answers in markdown would defeat it.
+  return toSpeech(raw);
 }

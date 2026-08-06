@@ -249,6 +249,32 @@ export async function tick() {
   }
 }
 
+// Keeping watched symbols warm in the cache so the first dossier of the day is
+// not the slow one. The work happens off the critical path of a question.
+let warmTimer = null;
+
+export async function warmFeed() {
+  const state = getState();
+  const symbols = state.watchlist.map((w) => (typeof w === 'string' ? w : w.sym)).filter(Boolean);
+  const held = (state.portfolio || []).map((p) => p.sym).filter(Boolean);
+  const wanted = [...new Set([...symbols, ...held])];
+  if (!wanted.length) return 0;
+
+  let warmed = 0;
+  for (const sym of wanted) {
+    try {
+      feed[sym] = await snapshot(sym);
+      warmed += 1;
+    } catch (err) {
+      // A cold symbol is not worth a warning every cycle; the breaker in the
+      // market layer already reports a real outage once.
+      log.debug(`warm failed for ${sym}: ${err?.message || err}`);
+    }
+  }
+  log.debug(`feed warmed: ${warmed}/${wanted.length}`);
+  return warmed;
+}
+
 export function start() {
   if (timer) return;
   startedAt = Date.now();
@@ -257,9 +283,24 @@ export function start() {
   }, config.autonomy.tickMs);
   if (timer.unref) timer.unref();
   log.info(`autonomy loop started (tick ${config.autonomy.tickMs}ms)`);
+
+  if (config.market.warmMs > 0) {
+    warmTimer = setInterval(() => {
+      warmFeed().catch((err) => log.debug(`warm cycle failed: ${err?.message || err}`));
+    }, config.market.warmMs);
+    if (warmTimer.unref) warmTimer.unref();
+    // First pass shortly after boot rather than one full interval later.
+    const kick = setTimeout(() => warmFeed().catch(() => {}), 3000);
+    if (kick.unref) kick.unref();
+    log.info(`feed warmer every ${config.market.warmMs / 1000}s`);
+  }
 }
 
 export function stop() {
+  if (warmTimer) {
+    clearInterval(warmTimer);
+    warmTimer = null;
+  }
   if (!timer) return;
   clearInterval(timer);
   timer = null;

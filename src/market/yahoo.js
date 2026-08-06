@@ -15,6 +15,10 @@ import { computeIndicators } from '../lib/indicators.js';
 import { log } from '../lib/log.js';
 
 const CRUMB_TTL_MS = 30 * 60 * 1000;
+const CRUMB_RETRY_MS = 10 * 60 * 1000;
+// How long to trust that a symbol's working quote source is still the working
+// one. Short enough that a recovered endpoint gets picked back up quickly.
+const QUOTE_ROUTE_TTL_MS = 10 * 60 * 1000;
 
 // Read through config so a mirror or a test stub can stand in for Yahoo.
 function base() {
@@ -22,7 +26,15 @@ function base() {
 }
 
 let crumbCache = { cookie: '', crumb: '', ts: 0 };
+let crumbFailedUntil = 0;
 const responseCache = new Map(); // key -> { ts, value }
+// Which rung of the quote ladder last worked. Without this every quote pays
+// for every failing rung above the one that actually answers.
+const quoteRoute = new Map(); // symbol -> { source, ts }
+// A symbol whose whole ladder just failed will almost certainly fail again in
+// the next few seconds. Remembering that is the difference between a dossier
+// on three tickers costing one timeout or nine.
+const quoteFailure = new Map(); // symbol -> { until, message }
 
 export function normalizeSymbol(input) {
   const sym = String(input || '')
@@ -51,11 +63,87 @@ function store(key, value) {
 
 export function clearMarketCache() {
   responseCache.clear();
+  quoteRoute.clear();
+  quoteFailure.clear();
+  consecutiveFailures = 0;
+  breakerOpenUntil = 0;
   crumbCache = { cookie: '', crumb: '', ts: 0 };
+  crumbFailedUntil = 0;
+}
+
+// When several symbols fail in a row it is the upstream that is down, not the
+// symbols. Without this, every new ticker in a dossier pays the full timeout
+// again to rediscover the same outage.
+let consecutiveFailures = 0;
+let breakerOpenUntil = 0;
+
+function breakerOpen() {
+  if (Date.now() < breakerOpenUntil) return true;
+  if (breakerOpenUntil) {
+    // Window elapsed: let the next call through to see if Yahoo is back.
+    breakerOpenUntil = 0;
+    consecutiveFailures = 0;
+  }
+  return false;
+}
+
+function noteFailure() {
+  consecutiveFailures += 1;
+  if (consecutiveFailures >= config.market.breakerThreshold) {
+    breakerOpenUntil = Date.now() + config.market.breakerMs;
+    log.warn(
+      `market feed looks down (${consecutiveFailures} failures) — failing fast for ${
+        config.market.breakerMs / 1000
+      }s`,
+    );
+  }
+}
+
+function noteSuccess() {
+  consecutiveFailures = 0;
+  breakerOpenUntil = 0;
+}
+
+export function marketHealth() {
+  return {
+    breakerOpen: Date.now() < breakerOpenUntil,
+    consecutiveFailures,
+    reopensInSec: breakerOpenUntil ? Math.max(0, Math.ceil((breakerOpenUntil - Date.now()) / 1000)) : 0,
+    cachedSymbols: [...quoteRoute.keys()],
+    crumb: Boolean(crumbCache.crumb),
+  };
+}
+
+function recentFailure(symbol) {
+  const hit = quoteFailure.get(symbol);
+  if (!hit) return null;
+  if (Date.now() > hit.until) {
+    quoteFailure.delete(symbol);
+    return null;
+  }
+  return hit;
+}
+
+function rememberFailure(symbol, message) {
+  quoteFailure.set(symbol, { until: Date.now() + config.market.failureTtlMs, message });
+  noteFailure();
+}
+
+function knownRoute(symbol) {
+  const hit = quoteRoute.get(symbol);
+  if (!hit) return null;
+  if (Date.now() - hit.ts > QUOTE_ROUTE_TTL_MS) {
+    quoteRoute.delete(symbol);
+    return null;
+  }
+  return hit.source;
 }
 
 async function getCrumb() {
   if (crumbCache.crumb && Date.now() - crumbCache.ts < CRUMB_TTL_MS) return crumbCache;
+  // Two extra round trips that fail together when Yahoo is gating us. Retrying
+  // them on every quote is what turns one slow call into a very slow one.
+  if (Date.now() < crumbFailedUntil) return crumbCache;
   try {
     // The consent hop hands out the session cookie the crumb is bound to.
     const seed = await fetchText('https://fc.yahoo.com/', { maxRedirects: 2 }).catch((e) => {
@@ -75,9 +163,12 @@ async function getCrumb() {
     const crumb = (crumbRes.body || '').trim();
     if (crumb && crumb.length < 40) {
       crumbCache = { cookie, crumb, ts: Date.now() };
+    } else {
+      crumbFailedUntil = Date.now() + CRUMB_RETRY_MS;
     }
   } catch (err) {
-    log.debug(`yahoo crumb unavailable: ${err?.message || err}`);
+    crumbFailedUntil = Date.now() + CRUMB_RETRY_MS;
+    log.debug(`yahoo crumb unavailable, skipping it for a while: ${err?.message || err}`);
   }
   return crumbCache;
 }
@@ -86,6 +177,7 @@ async function getJson(url, { withCrumb = false } = {}) {
   const auth = withCrumb ? await getCrumb() : null;
   const target = withCrumb && auth?.crumb ? `${url}&crumb=${encodeURIComponent(auth.crumb)}` : url;
   const res = await fetchText(target, {
+    timeoutMs: config.market.timeoutMs,
     headers: {
       Accept: 'application/json',
       ...(auth?.cookie ? { Cookie: auth.cookie } : {}),
@@ -108,10 +200,26 @@ export async function fetchChart(symbol, opts = {}) {
   const hit = cached(key);
   if (hit) return hit;
 
+  // The chart is the request every indicator depends on, so it gets the same
+  // fail-fast treatment as the quote. Without this a snapshot still pays a
+  // full timeout per symbol even with the quote ladder short-circuited.
+  const failed = recentFailure(sym);
+  if (failed) throw new FetchError(`${failed.message} (cached failure)`, 502);
+  if (breakerOpen()) {
+    throw new FetchError('market feed unavailable (failing fast after repeated errors)', 503);
+  }
+
   const url = `${base()}/v8/finance/chart/${encodeURIComponent(sym)}?range=${encodeURIComponent(
     range,
   )}&interval=${encodeURIComponent(interval)}&includePrePost=false&events=div%2Csplit`;
-  return store(key, await getJson(url));
+  try {
+    const json = store(key, await getJson(url));
+    noteSuccess();
+    return json;
+  } catch (err) {
+    rememberFailure(sym, err?.message || String(err));
+    throw err;
+  }
 }
 
 function summaryToQuote(sym, summary) {
@@ -198,36 +306,76 @@ export async function fetchQuote(symbol) {
   const hit = cached(key);
   if (hit) return hit;
 
+  // Fail fast on a symbol that just failed, rather than making the next caller
+  // wait out the same dead ladder.
+  const failed = recentFailure(sym);
+  if (failed) throw new FetchError(`${failed.message} (cached failure)`, 502);
+  if (breakerOpen()) {
+    throw new FetchError('market feed unavailable (failing fast after repeated errors)', 503);
+  }
+
+  // Once a rung is known to answer for this symbol, start there. Re-walking a
+  // failing ladder on every call is what makes a dossier feel like it hangs:
+  // each dead rung costs a full timeout, and three tickers pay it three times.
+  const route = knownRoute(sym);
+  // The ladder as a whole gets a budget, so a first call cannot stack three
+  // timeouts back to back.
+  const deadline = Date.now() + config.market.quoteBudgetMs;
+  const spent = () => Date.now() > deadline;
+
   // 1. Native v7 quote.
-  try {
-    const j = await getJson(
-      `${base()}/v7/finance/quote?symbols=${encodeURIComponent(sym)}`,
-      { withCrumb: true },
-    );
-    if (j?.quoteResponse?.result?.length) return store(key, j);
-  } catch (err) {
-    log.debug(`yahoo v7 quote failed for ${sym}: ${err?.message || err}`);
+  if ((!route || route === 'v7') && !spent()) {
+    try {
+      const j = await getJson(
+        `${base()}/v7/finance/quote?symbols=${encodeURIComponent(sym)}`,
+        { withCrumb: true },
+      );
+      if (j?.quoteResponse?.result?.length) {
+        quoteRoute.set(sym, { source: 'v7', ts: Date.now() });
+        noteSuccess();
+        return store(key, j);
+      }
+    } catch (err) {
+      log.debug(`yahoo v7 quote failed for ${sym}: ${err?.message || err}`);
+    }
   }
 
   // 2. quoteSummary, remapped.
-  try {
-    const modules = 'price,summaryDetail,defaultKeyStatistics,financialData,assetProfile';
-    const j = await getJson(
-      `${base()}/v10/finance/quoteSummary/${encodeURIComponent(sym)}?modules=${modules}`,
-      { withCrumb: true },
-    );
-    const mapped = summaryToQuote(sym, j);
-    if (mapped) {
-      return store(key, { quoteResponse: { result: [mapped], error: null }, source: 'quoteSummary' });
+  if ((!route || route === 'quoteSummary') && !spent()) {
+    try {
+      const modules = 'price,summaryDetail,defaultKeyStatistics,financialData,assetProfile';
+      const j = await getJson(
+        `${base()}/v10/finance/quoteSummary/${encodeURIComponent(sym)}?modules=${modules}`,
+        { withCrumb: true },
+      );
+      const mapped = summaryToQuote(sym, j);
+      if (mapped) {
+        quoteRoute.set(sym, { source: 'quoteSummary', ts: Date.now() });
+        noteSuccess();
+        return store(key, {
+          quoteResponse: { result: [mapped], error: null },
+          source: 'quoteSummary',
+        });
+      }
+    } catch (err) {
+      log.debug(`yahoo quoteSummary failed for ${sym}: ${err?.message || err}`);
     }
-  } catch (err) {
-    log.debug(`yahoo quoteSummary failed for ${sym}: ${err?.message || err}`);
   }
 
   // 3. Chart metadata only.
-  const chart = await fetchChart(sym);
-  const mapped = chartToQuote(sym, chart);
-  if (!mapped) throw new FetchError('no quote data available', 502);
+  let mapped = null;
+  try {
+    mapped = chartToQuote(sym, await fetchChart(sym));
+  } catch (err) {
+    rememberFailure(sym, err?.message || String(err));
+    throw err;
+  }
+  if (!mapped) {
+    rememberFailure(sym, 'no quote data available');
+    throw new FetchError('no quote data available', 502);
+  }
+  quoteRoute.set(sym, { source: 'chartMeta', ts: Date.now() });
+  noteSuccess();
   return store(key, {
     quoteResponse: { result: [mapped], error: null },
     source: 'chartMeta',
