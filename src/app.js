@@ -11,6 +11,7 @@ import { autonomyRouter } from './routes/autonomy.js';
 import { genomeRouter } from './routes/genome.js';
 import { voiceRouter } from './routes/voice.js';
 import { portfolioRouter } from './routes/portfolio.js';
+import { predictionsRouter } from './routes/predictions.js';
 import { status } from './autonomy/engine.js';
 import { marketHealth, fetchQuote } from './market/yahoo.js';
 import { probe } from './brain/client.js';
@@ -156,6 +157,7 @@ export function createApp() {
   app.use('/api', genomeRouter);
   app.use('/api', voiceRouter);
   app.use('/api', portfolioRouter);
+  app.use('/api', predictionsRouter);
 
   app.get('/', (_req, res) => {
     res.type('html').send(renderIndex());

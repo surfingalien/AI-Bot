@@ -26,6 +26,7 @@ the tab is closed.
 │  /api/intent         English in, cmds out│
 │  /api/portfolio      positions priced now│
 │  /api/diagnostics    where the time goes │
+│  /api/predictions    was it right?       │
 └───────────────┬──────────────────────────┘
                 │
       web · Yahoo Finance · your LLM · Slack/Discord
@@ -45,7 +46,7 @@ the Settings panel. Add `BRAIN_BASE`/`BRAIN_KEY` to `.env` and the model brain
 is wired up too, with the key staying on the server.
 
 ```bash
-npm test                  # 118 tests, no network required
+npm test                  # 134 tests, no network required
 npm run dev               # restart on change
 ```
 
@@ -165,6 +166,7 @@ the level exactly is not yet a crossing.
 | `scan watchlist` | refresh every watched symbol, emit a signal table |
 | `research <topic>` | run deep research, emit the cited brief |
 | `portfolio` | value every position and report P&L |
+| `score` | resolve past calls and report the scorecard |
 | `digest` | summarize armed goals and recent activity |
 | `log <text>` | activity log only, no outbound push |
 
@@ -297,6 +299,61 @@ rather than the whole valuation. Anything that could not be priced is listed in
 `incomplete` and **excluded from the totals** rather than silently counted as
 zero — a partial valuation that looks complete is worse than no valuation.
 
+### Being scored — `GET /api/predictions`
+
+Until now the signal engine emitted calls into the void: a BUY with a
+conviction letter, and nothing that ever went back to check. The ledger closes
+that loop. The approach is adapted from the
+[FinSurfing](https://github.com/surfingalien/FinSurfing) brain's learning cycle,
+whose discipline is the valuable part:
+
+- **Resolve at the exact horizon.** The bar closest to +7 and +30 days from the
+  call, not whatever the price happens to be when the job runs.
+- **A fill that never happened is not a win.** If price never traded into the
+  entry zone, the call is excluded from the win rate however well the symbol did
+  afterwards — and the fill rate is reported separately, because a strategy
+  whose entries rarely fill can look accurate while being untradeable.
+- **Measure against a benchmark.** Up 4% in a week the index rose 6% is not
+  skill, and the card says so.
+- **Compute the statistics in code.** A model may read the scorecard aloud; it
+  may not produce it.
+
+```bash
+curl 'localhost:8787/api/predictions?markdown=1'
+curl -X POST localhost:8787/api/predictions/resolve
+```
+
+Every actionable call from `scan watchlist` is logged automatically, and a
+`score` goal action resolves and reports on a schedule. Direction is respected —
+a SELL that fell is a win.
+
+The headline number is **calibration**: if high-conviction calls do not beat
+low-conviction ones, the conviction letter is decoration, and the card states
+that in plain language rather than burying it.
+
+### Analysis borrowed from FinSurfing
+
+- **Wilder's smoothed RSI** (`rsiWilder`) alongside the desk's simple-average
+  `rsi`. They genuinely disagree, so both are reported — a server number that
+  silently contradicts the number on screen is worse than either definition.
+- **ADX** for trend *strength*, which the score previously had no way to
+  express. It now caps conviction: a weak trend is exactly when this kind of
+  score is least worth acting on, and the reason is stated in the drivers.
+- **Entry zones instead of point targets.** Quoting an entry to the cent
+  implies a precision the rules do not have; the band is roughly half an average
+  day's range.
+- **Falsifiable thesis assumptions** — the two or three things that would have
+  to stop being true for the call to be wrong. These are emitted *in the goal
+  condition grammar*, so a thesis can be armed and alerted on when it breaks
+  rather than quietly going stale:
+
+  ```
+  full equity dossier on NVDA
+    → assumptions: price(NVDA) crosses below 131.4
+                   rsi(NVDA) crosses above 75
+    → arm either as a goal and the desk tells you when the thesis breaks
+  ```
+
 ### Why it used to feel slow
 
 The honest answer was the market feed, and it was bad: **a single quote cost
@@ -422,10 +479,10 @@ src/config.js          env-driven configuration
 src/routes/            fetch · notify · yahoo · brain · autonomy · genome · voice
 src/market/yahoo.js    feed with crumb handling and fallbacks
 src/autonomy/          store · conditions · actions · engine · research
-src/lib/               safeFetch · auth · indicators · speech · voiceBrief · intent
-                       portfolio · notify · rateLimit
+src/lib/               safeFetch · auth · indicators · predictions · speech · voiceBrief
+                       intent · portfolio · notify · rateLimit
 scripts/verify-feed.js check the live Yahoo chain end to end
-test/                  118 tests, no network required
+test/                  134 tests, no network required
 ```
 
 ## Notes on behaviour

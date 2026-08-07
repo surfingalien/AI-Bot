@@ -8,6 +8,7 @@
 //   remember key = value     write to durable memory
 //   scan watchlist           refresh every watched symbol, emit a signal table
 //   portfolio                value every position and report P&L
+//   score                    resolve past calls and report the scorecard
 //   research <topic>         run deep research, emit the cited brief
 //   digest                   one-line summary of open goals and recent activity
 //   log <text>               activity-log only, no outbound push
@@ -16,8 +17,10 @@ import { getState, rememberFact } from './store.js';
 import { snapshot } from '../market/yahoo.js';
 import { deepResearch } from './research.js';
 import { sendNotification } from '../lib/notify.js';
-import { localSignal } from '../lib/indicators.js';
+import { localSignal, thesisAssumptions } from '../lib/indicators.js';
 import { portfolioMarkdown, valuePortfolio } from '../lib/portfolio.js';
+import { logPrediction, resolveOutcomes, scorecard, scorecardMarkdown } from '../lib/predictions.js';
+import { config } from '../config.js';
 import { log } from '../lib/log.js';
 
 export function parseAction(text) {
@@ -32,6 +35,7 @@ export function parseAction(text) {
   }
   if (/^scan\s+watchlist$/i.test(a)) return { kind: 'scan' };
   if (/^portfolio$/i.test(a)) return { kind: 'portfolio' };
+  if (/^score$/i.test(a)) return { kind: 'score' };
   if ((m = a.match(/^research\s+(.+)$/i))) return { kind: 'research', topic: m[1].trim() };
   if (/^digest$/i.test(a)) return { kind: 'digest' };
   if ((m = a.match(/^log\s+(.+)$/i))) return { kind: 'log', text: m[1] };
@@ -72,6 +76,26 @@ async function runScan() {
       const snap = await snapshot(sym);
       const ind = snap.indicators;
       const sig = ind ? localSignal(ind) : null;
+
+      // Every actionable call goes in the ledger so it can be scored later.
+      // Without this the agent never finds out whether it was right.
+      if (sig && config.predictions.logSignals && (sig.label === 'BUY' || sig.label === 'SELL')) {
+        logPrediction({
+          symbol: sym,
+          label: sig.label,
+          conviction: sig.conv,
+          score: sig.score,
+          basePrice: ind.last,
+          entryLow: sig.entryLow,
+          entryHigh: sig.entryHigh,
+          stop: sig.stop,
+          target: sig.target,
+          reasons: sig.reasons,
+          assumptions: thesisAssumptions(ind, sig.label, sym),
+          source: 'scan',
+        });
+      }
+
       rows.push({
         symbol: sym,
         price: ind?.last ?? snap.quote?.regularMarketPrice ?? null,
@@ -172,6 +196,19 @@ export async function executeAction(action, ctx = {}) {
         summary,
         detail: { markdown: portfolioMarkdown(valuation), ...valuation },
       };
+    }
+
+    case 'score': {
+      const { resolved, pending } = await resolveOutcomes();
+      const card = scorecard();
+      const summary =
+        card.resolved === 0
+          ? `scorecard: nothing resolved yet (${card.logged} logged, ${pending} pending)`
+          : `scorecard: ${card.tradeable} filled call(s), win rate ${
+              card.winRate == null ? 'n/a' : `${Math.round(card.winRate * 100)}%`
+            }${card.alphaWinRate != null ? `, beat benchmark ${Math.round(card.alphaWinRate * 100)}%` : ''}` +
+            ` (+${resolved} newly resolved)`;
+      return { ok: true, summary, detail: { markdown: scorecardMarkdown(card), ...card } };
     }
 
     case 'digest':

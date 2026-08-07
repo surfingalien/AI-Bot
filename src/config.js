@@ -99,6 +99,14 @@ export const config = {
     max: int(env.RATE_LIMIT_MAX, 120),
   },
 
+  predictions: {
+    // Append-only, so a scorecard can always be recomputed from the raw record
+    // rather than trusted.
+    file: env.PREDICTIONS_FILE || 'data/predictions.jsonl',
+    // Log a call only when the signal is one somebody would act on.
+    logSignals: bool(env.PREDICTIONS_LOG_SIGNALS, true),
+  },
+
   voice: {
     // How long speech may wait on the model before the rules script is spoken
     // instead. Silence while a brief is written is worse than a plainer brief.

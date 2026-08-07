@@ -27,6 +27,90 @@ export function stdev(arr) {
   return Math.sqrt(variance);
 }
 
+/**
+ * Wilder's smoothed RSI — the standard definition, and what most charting
+ * packages show.
+ *
+ * The desk computes RSI as a simple average over the last 14 changes, so the
+ * two disagree; both are reported rather than one silently replacing the other,
+ * because a server number that contradicts the number on screen is worse than
+ * either definition being "wrong".
+ */
+export function rsiWilder(closes, period = 14) {
+  const n = closes.length;
+  if (n < period + 1) return null;
+
+  let gain = 0;
+  let loss = 0;
+  for (let i = 1; i <= period; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d >= 0) gain += d;
+    else loss -= d;
+  }
+  gain /= period;
+  loss /= period;
+
+  // Smooth forward over the rest of the series rather than restarting.
+  for (let i = period + 1; i < n; i++) {
+    const d = closes[i] - closes[i - 1];
+    gain = (gain * (period - 1) + (d > 0 ? d : 0)) / period;
+    loss = (loss * (period - 1) + (d < 0 ? -d : 0)) / period;
+  }
+
+  if (loss === 0) return gain === 0 ? 50 : 100;
+  return 100 - 100 / (1 + gain / loss);
+}
+
+/**
+ * Average Directional Index — trend *strength*, independent of direction.
+ *
+ * The existing score reads direction from moving averages but has no way to
+ * say "this trend is barely there", which is when its own signals are least
+ * worth acting on.
+ */
+export function adx(highs, lows, closes, period = 14) {
+  const n = closes.length;
+  if (n < period * 2) return null;
+
+  let smoothTr = 0;
+  let smoothPlus = 0;
+  let smoothMinus = 0;
+  const dxs = [];
+
+  for (let i = 1; i < n; i++) {
+    const upMove = highs[i] - highs[i - 1];
+    const downMove = lows[i - 1] - lows[i];
+    const plusDM = upMove > downMove && upMove > 0 ? upMove : 0;
+    const minusDM = downMove > upMove && downMove > 0 ? downMove : 0;
+    const tr = Math.max(
+      highs[i] - lows[i],
+      Math.abs(highs[i] - closes[i - 1]),
+      Math.abs(lows[i] - closes[i - 1]),
+    );
+
+    if (i <= period) {
+      smoothTr += tr;
+      smoothPlus += plusDM;
+      smoothMinus += minusDM;
+    } else {
+      smoothTr = smoothTr - smoothTr / period + tr;
+      smoothPlus = smoothPlus - smoothPlus / period + plusDM;
+      smoothMinus = smoothMinus - smoothMinus / period + minusDM;
+    }
+
+    if (i >= period && smoothTr > 0) {
+      const plusDI = (smoothPlus / smoothTr) * 100;
+      const minusDI = (smoothMinus / smoothTr) * 100;
+      const sum = plusDI + minusDI;
+      if (sum > 0) dxs.push((Math.abs(plusDI - minusDI) / sum) * 100);
+    }
+  }
+
+  if (dxs.length < period) return null;
+  const recent = dxs.slice(-period);
+  return recent.reduce((a, b) => a + b, 0) / period;
+}
+
 export function rsi(closes, period = 14) {
   const n = closes.length;
   if (n < period + 1) return null;
@@ -137,7 +221,11 @@ export function computeIndicators(series) {
     s20,
     s50,
     s200,
+    // Desk-compatible (simple average) and standard (Wilder's). They differ;
+    // reporting both keeps the screen and the server honest with each other.
     rsi: rsi(closes, 14),
+    rsiWilder: rsiWilder(closes, 14),
+    adx: adx(highs, lows, closes, 14),
     macdLine,
     signalLine,
     macdHist,
@@ -224,11 +312,68 @@ export function localSignal(ind) {
     cls = 'sell';
   }
 
-  const conv = Math.abs(score) >= 5 ? 'H' : Math.abs(score) >= 3 ? 'M' : 'L';
+  let conv = Math.abs(score) >= 5 ? 'H' : Math.abs(score) >= 3 ? 'M' : 'L';
+
+  // A weak trend is exactly when this kind of score is least worth acting on,
+  // so ADX caps conviction rather than being reported and ignored.
+  if (ind.adx != null && ind.adx < 20 && conv === 'H') {
+    conv = 'M';
+    reasons.push('ADX below 20 — trend too weak for high conviction');
+  }
+
   const entry = ind.last;
+  // A zone, not a point. Quoting an entry to the cent implies a precision the
+  // model does not have; the band is roughly half an average day's range.
+  const band = ind.atr ? ind.atr * 0.5 : ind.last * 0.01;
+  const entryLow = entry - band;
+  const entryHigh = entry + band;
   const stop = ind.atr ? ind.last - 2 * ind.atr : ind.last * 0.94;
   const target = ind.atr ? ind.last + 3 * ind.atr : ind.last * 1.12;
   const risk = ind.vol > 55 ? 8 : ind.vol > 40 ? 6 : ind.vol > 25 ? 4 : 3;
 
-  return { label, cls, conv, score, reasons, entry, stop, target, risk };
+  return {
+    label,
+    cls,
+    conv,
+    score,
+    reasons,
+    entry,
+    entryLow,
+    entryHigh,
+    stop,
+    target,
+    risk,
+    // Falsifiable conditions in the goal grammar, so a thesis can be armed and
+    // alerted on when it breaks rather than quietly going stale.
+    assumptions: thesisAssumptions(ind, label),
+  };
+}
+
+/**
+ * The two or three things that would have to stop being true for the call to
+ * be wrong, written as conditions the autonomy loop can evaluate.
+ */
+export function thesisAssumptions(ind, label, symbol = 'SYM') {
+  const out = [];
+  const round = (v) => Math.round(v * 100) / 100;
+
+  if (ind.s50 != null) {
+    out.push(
+      label === 'SELL'
+        ? `price(${symbol}) crosses above ${round(ind.s50)}`
+        : `price(${symbol}) crosses below ${round(ind.s50)}`,
+    );
+  }
+  if (ind.atr != null) {
+    const stop = label === 'SELL' ? ind.last + 2 * ind.atr : ind.last - 2 * ind.atr;
+    out.push(
+      label === 'SELL'
+        ? `price(${symbol}) crosses above ${round(stop)}`
+        : `price(${symbol}) crosses below ${round(stop)}`,
+    );
+  }
+  if (ind.rsi != null && label !== 'SELL') {
+    out.push(`rsi(${symbol}) crosses above 75`);
+  }
+  return out.slice(0, 3);
 }
