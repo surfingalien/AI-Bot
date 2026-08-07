@@ -10,7 +10,9 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env src/server.js",
     "dev": "node --env-file-if-exists=.env --watch src/server.js",
-    "test": "node --test \"test/*.test.js\""
+    "test": "node --test \"test/*.test.js\"",
+    "preflight": "node --env-file-if-exists=.env scripts/preflight.js",
+    "verify-feed": "node --env-file-if-exists=.env scripts/verify-feed.js"
   },
   "dependencies": {
     "express": "^4.21.2"

@@ -48,7 +48,7 @@ the Settings panel. Add `BRAIN_BASE`/`BRAIN_KEY` to `.env` and the model brain
 is wired up too, with the key staying on the server.
 
 ```bash
-npm test                  # 153 tests, no network required
+npm test                  # 159 tests, no network required
 npm run dev               # restart on change
 ```
 
@@ -489,6 +489,47 @@ a UI dossier therefore never disagree about the same symbol.
 None of this is financial advice — it is a transparent scoring rule, and the UI
 says so on every dossier.
 
+### Verifying a deployment — `npm run preflight`
+
+Everything in this server that can fail without being broken fails for one of
+two reasons: a host it cannot reach, or a credential it does not have. One
+command separates them:
+
+```bash
+npm run preflight            # check every configured dependency
+npm run preflight -- --send  # also deliver a real test email and alert
+```
+
+```
+✓ Market feed · chart      320 bars · last 227.60 · RSI 62.1 · BULL
+✓ Market feed · quote      via v7 · Apple Inc. 227.60
+○ Model brain              — not configured
+✓ Email                    test message delivered to you@example.com via resend
+✓ Alert webhook            test alert delivered
+```
+
+Two distinctions it makes on purpose:
+
+- **Not configured is not broken.** An unset provider is reported as skipped
+  with the variable that would enable it. Only things that are set up *and*
+  failing count against the exit code, so this can gate a deploy.
+- **A blocked host is not a rejected credential.** A network policy in front of
+  an allowlist answers `403` from somewhere that is not the destination, and it
+  answers instantly. Read literally that looks like the API refusing your key,
+  so the natural response is to regenerate keys for a request that never left
+  the building. When a refusal arrives faster than a real round trip could
+  complete, preflight says so:
+
+  ```
+  ✗ Market feed · chart
+        HTTP 403
+        This looks like a network policy refusing query1.finance.yahoo.com before
+        the request left your network — not the service rejecting your credentials.
+  ```
+
+  `/api/diagnostics` applies the same reading, so the SERVER panel's DIAGNOSE
+  button gives the same answer.
+
 ### Verifying the feed for real
 
 Yahoo's endpoints are unofficial: they rate-limit, gate on crumbs, and change
@@ -538,7 +579,7 @@ src/autonomy/          store · conditions · actions · engine · research
 src/lib/               safeFetch · auth · indicators · predictions · kelly · personas
                        email · speech · voiceBrief · portfolio · intent · notify
 scripts/verify-feed.js check the live Yahoo chain end to end
-test/                  153 tests, no network required
+test/                  159 tests, no network required
 ```
 
 ## Notes on behaviour

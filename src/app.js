@@ -14,6 +14,7 @@ import { portfolioRouter } from './routes/portfolio.js';
 import { predictionsRouter } from './routes/predictions.js';
 import { analysisRouter } from './routes/analysis.js';
 import { emailConfigured } from './lib/email.js';
+import { diagnoseFailure } from './lib/reachability.js';
 import { status } from './autonomy/engine.js';
 import { marketHealth, fetchQuote } from './market/yahoo.js';
 import { probe } from './brain/client.js';
@@ -140,16 +141,39 @@ export function createApp() {
       }),
     );
 
+    // Readiness only — diagnostics must never send a real email or alert as a
+    // side effect of being asked what is slow.
+    stages.push({
+      name: 'email provider',
+      ms: 0,
+      ok: emailConfigured() && Boolean(config.email.to),
+      detail: emailConfigured()
+        ? config.email.to
+          ? `configured, recipient ${config.email.to}`
+          : 'provider set but EMAIL_TO is empty'
+        : 'not configured',
+    });
+    stages.push({
+      name: 'alert webhook',
+      ms: 0,
+      ok: Boolean(config.notify.webhook),
+      detail: config.notify.webhook ? 'configured' : 'not configured',
+    });
+
     const total = stages.reduce((a, s) => a + s.ms, 0);
     res.json({
       ok: true,
       totalMs: total,
       stages,
       market: marketHealth(),
-      hint:
-        stages.find((s) => !s.ok && s.name.startsWith('market'))
-          ? 'The market feed is failing; dossiers will be slow until the breaker settles or the feed recovers.'
-          : null,
+      hint: (() => {
+        const feed = stages.find((s) => !s.ok && s.name.startsWith('market'));
+        if (!feed) return null;
+        const { kind, advice } = diagnoseFailure(feed.error || '', feed.ms, 'the market feed');
+        return kind === 'policy'
+          ? advice
+          : 'The market feed is failing; dossiers will be slow until the breaker settles or the feed recovers.';
+      })(),
     });
   });
 
