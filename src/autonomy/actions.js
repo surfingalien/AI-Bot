@@ -9,6 +9,7 @@
 //   scan watchlist           refresh every watched symbol, emit a signal table
 //   portfolio                value every position and report P&L
 //   score                    resolve past calls and report the scorecard
+//   email <report>           mail a report: scorecard | portfolio | scan | digest
 //   research <topic>         run deep research, emit the cited brief
 //   digest                   one-line summary of open goals and recent activity
 //   log <text>               activity-log only, no outbound push
@@ -20,6 +21,7 @@ import { sendNotification } from '../lib/notify.js';
 import { localSignal, thesisAssumptions } from '../lib/indicators.js';
 import { portfolioMarkdown, valuePortfolio } from '../lib/portfolio.js';
 import { logPrediction, resolveOutcomes, scorecard, scorecardMarkdown } from '../lib/predictions.js';
+import { sendEmail } from '../lib/email.js';
 import { config } from '../config.js';
 import { log } from '../lib/log.js';
 
@@ -36,6 +38,9 @@ export function parseAction(text) {
   if (/^scan\s+watchlist$/i.test(a)) return { kind: 'scan' };
   if (/^portfolio$/i.test(a)) return { kind: 'portfolio' };
   if (/^score$/i.test(a)) return { kind: 'score' };
+  if ((m = a.match(/^email\s+(scorecard|portfolio|scan|digest)$/i))) {
+    return { kind: 'email', report: m[1].toLowerCase() };
+  }
   if ((m = a.match(/^research\s+(.+)$/i))) return { kind: 'research', topic: m[1].trim() };
   if (/^digest$/i.test(a)) return { kind: 'digest' };
   if ((m = a.match(/^log\s+(.+)$/i))) return { kind: 'log', text: m[1] };
@@ -209,6 +214,47 @@ export async function executeAction(action, ctx = {}) {
             }${card.alphaWinRate != null ? `, beat benchmark ${Math.round(card.alphaWinRate * 100)}%` : ''}` +
             ` (+${resolved} newly resolved)`;
       return { ok: true, summary, detail: { markdown: scorecardMarkdown(card), ...card } };
+    }
+
+    case 'email': {
+      // The report is produced by the same code path that serves it elsewhere,
+      // so what lands in the inbox is what the API would have returned.
+      const producers = {
+        scorecard: async () => {
+          await resolveOutcomes();
+          const card = scorecard();
+          return { markdown: scorecardMarkdown(card), subject: 'Prediction scorecard' };
+        },
+        portfolio: async () => {
+          const valuation = await valuePortfolio();
+          return { markdown: portfolioMarkdown(valuation), subject: 'Portfolio valuation' };
+        },
+        scan: async () => {
+          const result = await runScan();
+          return { markdown: result.detail?.markdown || result.summary, subject: 'Market scan' };
+        },
+        digest: async () => {
+          const result = await runDigest();
+          return { markdown: result.detail?.markdown || result.summary, subject: 'Agent digest' };
+        },
+      };
+
+      const produce = producers[action.report];
+      if (!produce) return { ok: false, summary: `unknown report: ${action.report}`, detail: null };
+
+      const { markdown, subject } = await produce();
+      const delivery = await sendEmail({
+        subject: `SurfingAlien — ${subject}`,
+        markdown,
+      });
+
+      return {
+        ok: delivery.sent,
+        summary: delivery.sent
+          ? `emailed the ${action.report} via ${delivery.via}`
+          : `${action.report} not emailed: ${delivery.reason}`,
+        detail: { ...delivery, markdown },
+      };
     }
 
     case 'digest':

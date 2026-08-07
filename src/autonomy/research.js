@@ -6,6 +6,7 @@ import { config, brainConfigured } from '../config.js';
 import { complete } from '../brain/client.js';
 import { fetchText } from '../lib/safeFetch.js';
 import { htmlToText } from '../lib/htmlText.js';
+import { personaSystemPrompt } from '../lib/personas.js';
 import { log } from '../lib/log.js';
 
 const SOURCE_PROMPT =
@@ -45,7 +46,7 @@ export async function readPage(url) {
  * @param {string[]} urls Explicit sources; when empty the model proposes them.
  * @returns {Promise<{markdown:string, cited:Array, tried:string[]}>}
  */
-export async function deepResearch(topic, urls = []) {
+export async function deepResearch(topic, urls = [], options = {}) {
   const targets = urls.length ? urls.slice(0, 4) : await proposeSources(topic);
   if (!targets.length) {
     return {
@@ -104,11 +105,19 @@ export async function deepResearch(topic, urls = []) {
   }
 
   try {
+    // Persona framing shapes emphasis; the honesty rules inside
+    // personaSystemPrompt outrank it, so the figures stay the sources' own.
+    const persona = options.persona || config.analysis.persona;
+    const system =
+      persona && persona !== 'neutral'
+        ? personaSystemPrompt(persona, SYNTHESIS_PROMPT)
+        : SYNTHESIS_PROMPT;
+
     const markdown = await complete([
-      { role: 'system', content: SYNTHESIS_PROMPT },
+      { role: 'system', content: system },
       { role: 'user', content: `Topic: ${topic}\n\nSOURCES:\n${snippets.join('\n\n')}` },
     ]);
-    return { markdown, cited, tried: targets };
+    return { markdown, cited, tried: targets, persona: options.persona || config.analysis.persona };
   } catch (err) {
     return {
       markdown: `Deep research synthesis failed: ${err?.message || err}`,

@@ -12,6 +12,8 @@ import { genomeRouter } from './routes/genome.js';
 import { voiceRouter } from './routes/voice.js';
 import { portfolioRouter } from './routes/portfolio.js';
 import { predictionsRouter } from './routes/predictions.js';
+import { analysisRouter } from './routes/analysis.js';
+import { emailConfigured } from './lib/email.js';
 import { status } from './autonomy/engine.js';
 import { marketHealth, fetchQuote } from './market/yahoo.js';
 import { probe } from './brain/client.js';
@@ -95,6 +97,8 @@ export function createApp() {
       egress: { privateAllowed: config.fetch.allowPrivateEgress },
       auth: { required: authRequired() },
       voice: { alerts: config.notify.voice },
+      email: { configured: emailConfigured() },
+      analysis: { persona: config.analysis.persona },
       autonomy: { enabled: config.autonomy.enabled, ...status() },
     });
   });
@@ -158,6 +162,7 @@ export function createApp() {
   app.use('/api', voiceRouter);
   app.use('/api', portfolioRouter);
   app.use('/api', predictionsRouter);
+  app.use('/api', analysisRouter);
 
   app.get('/', (_req, res) => {
     res.type('html').send(renderIndex());

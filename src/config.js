@@ -107,6 +107,33 @@ export const config = {
     logSignals: bool(env.PREDICTIONS_LOG_SIGNALS, true),
   },
 
+  email: {
+    // Resend needs no dependency, so it is the path that always works. SMTP
+    // needs nodemailer, which is an optional install.
+    resendKey: env.RESEND_API_KEY || '',
+    // Overridable for a relay, a self-hosted gateway, or a test stub.
+    resendUrl: env.RESEND_ENDPOINT || 'https://api.resend.com/emails',
+    from: env.EMAIL_FROM || 'SurfingAlien <onboarding@resend.dev>',
+    to: env.EMAIL_TO || '',
+    timeoutMs: int(env.EMAIL_TIMEOUT_MS, 15000),
+    smtp: {
+      host: env.SMTP_HOST || '',
+      port: int(env.SMTP_PORT, 587),
+      secure: bool(env.SMTP_SECURE, false),
+      user: env.SMTP_USER || '',
+      pass: env.SMTP_PASS || '',
+    },
+  },
+
+  analysis: {
+    // Framing for written analysis. Never changes the figures.
+    persona: env.ANALYSIS_PERSONA || 'neutral',
+    // Half Kelly, capped: full Kelly assumes the probability is exactly right.
+    kellyFraction: Number(env.KELLY_FRACTION) || 0.5,
+    kellyMaxFraction: Number(env.KELLY_MAX_FRACTION) || 0.2,
+    kellyMinSamples: int(env.KELLY_MIN_SAMPLES, 15),
+  },
+
   voice: {
     // How long speech may wait on the model before the rules script is spoken
     // instead. Silence while a brief is written is worse than a plainer brief.

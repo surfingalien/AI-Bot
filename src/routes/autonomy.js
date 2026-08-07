@@ -123,7 +123,7 @@ autonomyRouter.post('/research', rateLimit({ name: 'research', max: 10 }), async
   if (!topic) return res.status(400).json({ ok: false, error: 'topic required' });
   const urls = Array.isArray(req.body?.urls) ? req.body.urls.slice(0, 4) : [];
   try {
-    const result = await deepResearch(topic, urls);
+    const result = await deepResearch(topic, urls, { persona: req.body?.persona });
     return res.json({ ok: true, ...result });
   } catch (err) {
     return bad(res, err);
