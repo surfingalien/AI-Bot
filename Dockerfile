@@ -10,12 +10,16 @@ COPY src ./src
 COPY public ./public
 COPY scripts ./scripts
 
-# State lives on a mounted volume; the image itself stays disposable.
+# State lives on a volume the host attaches at /data; the image is disposable.
+#
+# There is deliberately no VOLUME instruction. Railway's builder rejects the
+# Dockerfile outright if it finds one, and it buys nothing: Railway mounts the
+# volume you attach in its UI, and `docker run -v ...` works the same without
+# it. Declaring VOLUME would only add anonymous volumes on other hosts.
 RUN mkdir -p /data
 ENV NODE_ENV=production \
     STATE_FILE=/data/state.json \
     PREDICTIONS_FILE=/data/predictions.jsonl
-VOLUME ["/data"]
 
 # The host injects PORT at runtime — nothing is hardcoded here.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \

@@ -504,7 +504,7 @@ requirements come first:
 
 | Platform | Verdict |
 |---|---|
-| **Railway** | Recommended, and `railway.toml` is included. Always-on, volumes, and what FinSurfing already deploys to. |
+| **Railway** | Recommended, and `railway.toml` + `Dockerfile` are included. Always-on, volumes, and what FinSurfing already deploys to. |
 | **Fly.io** | Good — persistent volumes and a long-lived process. |
 | **Render** | Works on a paid instance. The free tier sleeps, which stops the loop, and disks need a paid plan. |
 | **A small VPS / any Docker host** | Fine. `Dockerfile` included; mount a volume at `/data`. |
@@ -513,7 +513,7 @@ requirements come first:
 ### Railway, start to finish
 
 ```bash
-# 1. Deploy from the repo — railway.toml is picked up automatically.
+# 1. Deploy from the repo — railway.toml selects the Dockerfile build.
 # 2. Add a volume mounted at /data, then set:
 STATE_FILE=/data/state.json
 PREDICTIONS_FILE=/data/predictions.jsonl
@@ -525,6 +525,15 @@ NOTIFY_WEBHOOK=...
 # 4. Confirm from the deployed shell:
 npm run preflight -- --send
 ```
+
+**Do not add a `VOLUME` instruction to the Dockerfile.** Railway's builder
+rejects the whole Dockerfile if it finds one (`dockerfile invalid: docker
+VOLUME at Line …`), and it buys nothing — Railway mounts the volume you attach
+in its UI, and `docker run -v host:/data` works the same without it. The repo
+ships exactly one build definition for the same reason: a `Dockerfile` at the
+root takes precedence on Railway regardless of what `builder` says, so
+`railway.toml` names `DOCKERFILE` rather than quietly disagreeing with the
+build that actually runs.
 
 **The volume is the part people skip.** Without it every deploy starts from an
 empty `data/`, so armed goals vanish and the prediction ledger restarts — which
