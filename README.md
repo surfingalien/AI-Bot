@@ -489,6 +489,52 @@ a UI dossier therefore never disagree about the same symbol.
 None of this is financial advice — it is a transparent scoring rule, and the UI
 says so on every dossier.
 
+## Deploying
+
+What this needs is unusual enough to rule out a whole class of hosting, so the
+requirements come first:
+
+| Requirement | Why |
+|---|---|
+| A process that stays alive | The autonomy loop only fires while something is running. A host that sleeps means goals silently do not fire. |
+| A persistent disk | Goals, memory and the prediction ledger live in `data/`. An ephemeral filesystem resets the scorecard on every deploy. |
+| Exactly one replica | Two instances means two loops firing the same goals — duplicate alerts, duplicate ledger entries. |
+| Outbound HTTPS | Yahoo, your model provider, Resend, your webhook. |
+| Node 20+ | One runtime dependency, no build step. |
+
+| Platform | Verdict |
+|---|---|
+| **Railway** | Recommended, and `railway.toml` is included. Always-on, volumes, and what FinSurfing already deploys to. |
+| **Fly.io** | Good — persistent volumes and a long-lived process. |
+| **Render** | Works on a paid instance. The free tier sleeps, which stops the loop, and disks need a paid plan. |
+| **A small VPS / any Docker host** | Fine. `Dockerfile` included; mount a volume at `/data`. |
+| **Vercel · Netlify · Cloudflare Workers** | **No.** Serverless has no long-lived process and no writable disk, so the autonomy loop and the ledger cannot work. The desk is static enough to host there, but the agent behind it is the point. |
+
+### Railway, start to finish
+
+```bash
+# 1. Deploy from the repo — railway.toml is picked up automatically.
+# 2. Add a volume mounted at /data, then set:
+STATE_FILE=/data/state.json
+PREDICTIONS_FILE=/data/predictions.jsonl
+# 3. Set the secrets you actually want:
+API_TOKEN=$(openssl rand -hex 24)   # required once it is public
+BRAIN_BASE=...  BRAIN_KEY=...
+RESEND_API_KEY=...  EMAIL_TO=...
+NOTIFY_WEBHOOK=...
+# 4. Confirm from the deployed shell:
+npm run preflight -- --send
+```
+
+**The volume is the part people skip.** Without it every deploy starts from an
+empty `data/`, so armed goals vanish and the prediction ledger restarts — which
+does not look like data loss, it looks like the scorecard mysteriously refusing
+to accumulate.
+
+`/api/health` sits outside the auth check so a platform probe never needs the
+token. Everything else is closed once `API_TOKEN` is set, and the server warns
+at boot if it is listening off-loopback without one.
+
 ### Verifying a deployment — `npm run preflight`
 
 Everything in this server that can fail without being broken fails for one of

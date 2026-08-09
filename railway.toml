@@ -1,0 +1,21 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "node src/server.js"
+# /api/health is deliberately outside the auth check, so a probe never needs
+# the API token.
+healthcheckPath = "/api/health"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+# The autonomy loop only runs while a process is alive, so this must not scale
+# to zero. Two replicas would also mean two loops firing the same goals.
+numReplicas = 1
+
+# Attach a volume mounted at /data, then point the state files into it:
+#   STATE_FILE=/data/state.json
+#   PREDICTIONS_FILE=/data/predictions.jsonl
+# Without a volume the container filesystem is ephemeral, and every deploy
+# silently resets the armed goals and the prediction ledger — which looks like
+# the scorecard quietly refusing to accumulate rather than like data loss.
