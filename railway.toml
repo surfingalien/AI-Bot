@@ -1,5 +1,8 @@
 [build]
-builder = "NIXPACKS"
+# Explicit, because a Dockerfile in the repo root takes precedence anyway —
+# declaring NIXPACKS here while shipping a Dockerfile means the config and the
+# build disagree about what is being built.
+builder = "DOCKERFILE"
 
 [deploy]
 startCommand = "node src/server.js"
