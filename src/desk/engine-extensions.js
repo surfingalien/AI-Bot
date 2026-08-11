@@ -1,0 +1,219 @@
+/* eslint-disable */
+// Tools the server adds to the desk's engine.
+//
+// This file is never imported. It is read as text and spliced into the end of
+// the `#engineSrc` block, so it runs inside the engine's own closure and can
+// see `TOOLS`, `TOOL_BY_NAME`, `TOOL_SCHEMAS` and `S`. Those are not reachable
+// any other way: the engine is evaluated with `new Function(src)`, so none of
+// its state is global, and a separate <script> tag can only see the window.
+//
+// Written in the engine's own dialect — ES5, var, no arrow functions — because
+// it becomes part of that source and shares its parse.
+//
+// Everything here is additive and guarded by name. When a newer desk build
+// arrives already carrying one of these tools, its version wins and this file
+// registers nothing, so dropping in a new index.html never conflicts.
+
+(function () {
+  if (typeof TOOLS === 'undefined' || typeof TOOL_BY_NAME === 'undefined') return;
+
+  function proxy(path, opts) {
+    if (!S.dataBase) return Promise.reject(new Error('no DATA PROXY configured'));
+    // Same-origin, so the httpOnly token cookie authenticates this by itself —
+    // the desk never holds the secret.
+    return fetch(S.dataBase.replace(/\/$/, '') + path, opts);
+  }
+
+  function readJson(res) {
+    return res
+      .json()
+      .catch(function () {
+        return {};
+      })
+      .then(function (body) {
+        return { status: res.status, body: body || {} };
+      });
+  }
+
+  function register(tool) {
+    // A newer desk build that already ships this tool keeps its own version.
+    if (TOOL_BY_NAME[tool.name]) return;
+    TOOLS.push(tool);
+    TOOL_BY_NAME[tool.name] = tool;
+    var props = {};
+    for (var k in tool.p) props[k] = { type: tool.p[k] };
+    TOOL_SCHEMAS.push({
+      type: 'function',
+      function: {
+        name: tool.name,
+        description: tool.desc,
+        parameters: { type: 'object', properties: props, required: [] },
+      },
+    });
+  }
+
+  function dialable(phone) {
+    return String(phone || '').replace(/[^0-9+]/g, '');
+  }
+
+  // Reads back as one line in the transcript, so the operator can see what was
+  // asked for without opening anything.
+  function summarise(b) {
+    var bits = [b.venue || 'somewhere'];
+    if (b.partySize) bits.push('party of ' + b.partySize);
+    if (b.when) bits.push(b.when);
+    return bits.join(' · ');
+  }
+
+  register({
+    name: 'book_restaurant',
+    desc:
+      'BOOK A TABLE by having the server phone the venue. Provide venue and phone; ' +
+      'partySize, when, onBehalfOf and notes are optional. If the server cannot place ' +
+      'calls it returns a script to read out, which you should show the user verbatim.',
+    p: {
+      venue: 'string',
+      phone: 'string',
+      partySize: 'number',
+      when: 'string',
+      onBehalfOf: 'string',
+      notes: 'string',
+    },
+    exec: function (a, ctx) {
+      if (!S.dataBase) return 'booking needs the DATA PROXY';
+      var booking = {
+        venue: String(a.venue || ''),
+        phone: String(a.phone || ''),
+        partySize: parseInt(a.partySize, 10) || 0,
+        when: String(a.when || ''),
+        onBehalfOf: String(a.onBehalfOf || ''),
+        notes: String(a.notes || ''),
+      };
+
+      return proxy('/api/book', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(booking),
+      })
+        .then(readJson)
+        .then(function (res) {
+          var j = res.body;
+
+          if (res.status === 400) {
+            ctx.actions.push({ t: 'stat', label: 'booking incomplete' });
+            return '**I need more before I can call.** ' + (j.error || 'the booking is incomplete') + '.';
+          }
+
+          // The server has no voice line. This is the path that matters: say so
+          // plainly, then hand over everything needed to do it by hand.
+          if (res.status === 501) {
+            var f = j.fallback || booking;
+            ctx.actions.push({
+              t: 'stat',
+              label: 'booking: ' + (j.configured ? 'not implemented' : 'not configured') + ' — call it yourself',
+            });
+
+            // The script is the whole value of this path, and handing it back to
+            // the model is not enough: the model paraphrases, and the exact
+            // words are what the operator needs in their mouth on the call. The
+            // desk's copy chip copies a whole turn rather than a payload, so the
+            // script gets a turn of its own — the same channel reminders use.
+            // Nothing between here and the screen can reword it.
+            // Quoted rather than a blockquote: the desk's markdown renders bold,
+            // code and lists, but prints a leading `>` literally.
+            var card = ['**' + (f.venue || 'the venue') + '** — ' + (f.phone || 'no number given')];
+            if (f.script) card.push('', 'Read this out:', '', '**“' + f.script + '”**');
+            if (j.reason) card.push('', '`' + j.reason + '`');
+            pushTurn({
+              user: '(call script for ' + (f.venue || 'the venue') + ')',
+              agentId: 'ops',
+              agentName: 'Booking',
+              color: 'amber',
+              // `md` renders; `text` is escaped and shown raw. The script is
+              // formatted, so it has to go through the markdown branch.
+              md: card.join('\n'),
+              text: card.join('\n'),
+              pre: null,
+              actions: dialable(f.phone)
+                ? [
+                    { t: 'open', label: 'call ' + (f.venue || 'the venue'), url: 'tel:' + dialable(f.phone) },
+                    { t: 'copy', label: 'copy call script' },
+                  ]
+                : [{ t: 'copy', label: 'copy call script' }],
+              t: Date.now(),
+            });
+
+            var lines = ['**I cannot place the call from here.** ' + (j.error || 'voice booking is unavailable') + '.'];
+            if (j.reason) lines.push('', j.reason + '.');
+            lines.push('', 'The call script is posted above — read it to the venue verbatim.');
+            return lines.join('\n');
+          }
+
+          if (res.status >= 200 && res.status < 300 && j.sid) {
+            ctx.actions.push({ t: 'stat', label: 'calling ' + summarise(booking) });
+            return followCall(j.sid, booking, 0);
+          }
+
+          return 'booking failed: ' + (j.error || 'HTTP ' + res.status);
+        })
+        .catch(function (e) {
+          return 'booking failed: ' + ((e && e.message) || e);
+        });
+    },
+  });
+
+  // Terminal states end the wait; anything else is still in progress. Capped so
+  // a call that never resolves does not hold the turn open forever — the sid is
+  // handed back instead, and call_status picks it up later.
+  var DONE = /^(completed|booked|confirmed|failed|busy|no-answer|canceled|cancelled)$/i;
+
+  function followCall(sid, booking, tries) {
+    return proxy('/api/book/status/' + encodeURIComponent(sid))
+      .then(readJson)
+      .then(function (res) {
+        var j = res.body;
+        if (res.status === 501) {
+          return 'The call was placed but cannot be followed from here: ' + (j.error || 'no status available') + '.';
+        }
+        var state = String(j.status || 'unknown');
+        if (DONE.test(state)) {
+          var out = ['**Call ' + state.toLowerCase() + '** — ' + summarise(booking) + '.'];
+          if (j.summary) out.push('', j.summary);
+          return out.join('\n');
+        }
+        if (tries >= 8) {
+          return (
+            'Still ringing after a while (`' + state + '`). The call id is `' + sid + '` — ' +
+            'ask me for its status and I will check again.'
+          );
+        }
+        return new Promise(function (resolve) {
+          setTimeout(resolve, 4000);
+        }).then(function () {
+          return followCall(sid, booking, tries + 1);
+        });
+      });
+  }
+
+  register({
+    name: 'call_status',
+    desc: 'Check how a booking call placed earlier is going. Provide the call id (sid).',
+    p: { sid: 'string' },
+    exec: function (a, ctx) {
+      var sid = String(a.sid || '');
+      if (!sid) return 'give me the call id';
+      if (!S.dataBase) return 'booking needs the DATA PROXY';
+      return proxy('/api/book/status/' + encodeURIComponent(sid))
+        .then(readJson)
+        .then(function (res) {
+          var j = res.body;
+          if (res.status === 501) return 'No call has that id: ' + (j.error || 'voice booking is unavailable') + '.';
+          ctx.actions.push({ t: 'stat', label: 'call ' + sid + ': ' + (j.status || 'unknown') });
+          return '**' + sid + '** — ' + (j.status || 'unknown') + (j.summary ? '\n\n' + j.summary : '');
+        })
+        .catch(function (e) {
+          return 'could not check that call: ' + ((e && e.message) || e);
+        });
+    },
+  });
+})();

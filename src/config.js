@@ -140,10 +140,24 @@ export const config = {
     deadlineMs: int(env.VOICE_DEADLINE_MS, 2500),
   },
 
+  booking: {
+    // Voice booking. Unset means the capability is absent, and /api/book says
+    // so out loud rather than 404ing — the desk degrades to a call script
+    // either way, but only one of those tells the operator why.
+    provider: 'twilio',
+    accountSid: env.TWILIO_ACCOUNT_SID || '',
+    authToken: env.TWILIO_AUTH_TOKEN || '',
+    from: env.TWILIO_FROM_NUMBER || '',
+  },
+
   auth: {
     // Unset means open, which is fine on loopback and nowhere else: anyone who
     // can reach the port can arm goals and spend the model budget.
-    token: env.API_TOKEN || '',
+    //
+    // PROXY_TOKEN is read as well because the desk's settings panel tells the
+    // operator that name. Accepting only API_TOKEN meant following the UI's
+    // own instructions produced an open server with nothing to explain it.
+    token: env.API_TOKEN || env.PROXY_TOKEN || '',
     cookieName: 'sa_token',
     cookieMaxAgeSec: int(env.API_TOKEN_COOKIE_MAX_AGE, 30 * 24 * 3600),
   },
@@ -155,4 +169,9 @@ export function authRequired() {
 
 export function brainConfigured() {
   return Boolean(config.brain.base);
+}
+
+export function bookingConfigured() {
+  const b = config.booking;
+  return Boolean(b.accountSid && b.authToken && b.from);
 }
