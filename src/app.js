@@ -1,6 +1,6 @@
 import express from 'express';
 import path from 'node:path';
-import { config, brainConfigured, authRequired } from './config.js';
+import { config, brainConfigured, authRequired, bookingConfigured } from './config.js';
 import { authMiddleware } from './lib/auth.js';
 import { renderIndex } from './ui.js';
 import { fetchRouter } from './routes/fetch.js';
@@ -13,6 +13,7 @@ import { voiceRouter } from './routes/voice.js';
 import { portfolioRouter } from './routes/portfolio.js';
 import { predictionsRouter } from './routes/predictions.js';
 import { analysisRouter } from './routes/analysis.js';
+import { bookRouter } from './routes/book.js';
 import { emailConfigured } from './lib/email.js';
 import { diagnoseFailure } from './lib/reachability.js';
 import { status } from './autonomy/engine.js';
@@ -99,6 +100,7 @@ export function createApp() {
       auth: { required: authRequired() },
       voice: { alerts: config.notify.voice },
       email: { configured: emailConfigured() },
+      booking: { configured: bookingConfigured(), provider: config.booking.provider },
       analysis: { persona: config.analysis.persona },
       autonomy: { enabled: config.autonomy.enabled, ...status() },
     });
@@ -187,6 +189,7 @@ export function createApp() {
   app.use('/api', portfolioRouter);
   app.use('/api', predictionsRouter);
   app.use('/api', analysisRouter);
+  app.use('/api', bookRouter);
 
   app.get('/', (_req, res) => {
     res.type('html').send(renderIndex());
