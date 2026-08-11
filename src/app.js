@@ -77,7 +77,12 @@ export function createApp() {
   app.disable('x-powered-by');
 
   app.use(cors);
-  app.use(express.json({ limit: '1mb' }));
+  // `text/plain` is accepted because `fetch(url, {body: JSON.stringify(x)})`
+  // sends that when the caller forgets Content-Type — which desk builds do.
+  // Refusing to parse it turns a working request into "missing: venue, phone",
+  // a message about the wrong problem entirely. Bodies still have to be JSON;
+  // a genuinely plain-text body is rejected by the parser as before.
+  app.use(express.json({ limit: '1mb', type: ['application/json', 'application/*+json', 'text/plain'] }));
   app.use(timing);
 
   // Health stays open so a load balancer never needs the secret.

@@ -15,6 +15,12 @@ process.env.LOG_LEVEL = 'error';
 
 const { createApp } = await import('../src/app.js');
 const { callScript } = await import('../src/routes/book.js');
+const { resetRateLimits } = await import('../src/lib/rateLimit.js');
+
+// Booking is limited to 10/minute, which this file exceeds — the limiter is
+// working, the tests just should not share one bucket.
+test.beforeEach(() => resetRateLimits());
+
 const server = createApp().listen(0);
 await new Promise((r) => server.once('listening', r));
 const base = `http://127.0.0.1:${server.address().port}`;
@@ -76,6 +82,31 @@ test('a phone number scraped off a page is rejected here, not by Twilio', async 
   // Human separators are fine; what is left has to be digits.
   const ok = await post({ venue: 'X', phone: '(323) 297-0100' });
   assert.equal(ok.status, 501, 'a usable number gets past validation');
+});
+
+test('a body sent without Content-Type is still parsed', async () => {
+  // `fetch(url, {body: JSON.stringify(x)})` with no Content-Type sends
+  // text/plain. A desk build shipped exactly that, and refusing to parse it
+  // answered "missing: venue, phone" — a complaint about the wrong problem.
+  const res = await fetch(`${base}/api/book`, {
+    method: 'POST',
+    body: JSON.stringify({ restaurant: 'Nobu', phone: '+13232970100', party: 2 }),
+  });
+  assert.equal(res.status, 501, 'the fields were read, so the refusal is about Twilio');
+  assert.equal((await res.json()).fallback.venue, 'Nobu');
+});
+
+test('`name` is the guest when a venue is named, and the venue when it is not', async () => {
+  const withVenue = await (
+    await post({ restaurant: 'Nobu', phone: '+13232970100', party: 2, when: 'Friday 7pm', name: 'Tony' })
+  ).json();
+  assert.equal(withVenue.fallback.venue, 'Nobu');
+  assert.equal(withVenue.fallback.onBehalfOf, 'Tony');
+  assert.match(withVenue.fallback.script, /under the name Tony/);
+
+  const alone = await (await post({ name: 'Bestia', phone: '+13232970100' })).json();
+  assert.equal(alone.fallback.venue, 'Bestia', 'with nothing else, name is the venue');
+  assert.equal(alone.fallback.onBehalfOf, '');
 });
 
 test('the desk’s other spellings of the same fields are understood', async () => {
