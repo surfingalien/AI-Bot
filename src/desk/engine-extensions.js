@@ -56,6 +56,36 @@
     return String(phone || '').replace(/[^0-9+]/g, '');
   }
 
+  // A phone number is the slowest way to get a table and the only one that
+  // needs a human. Where the desk can name a venue it can also hand over the
+  // two booking sites and a calendar hold, so the fallback is a set of choices
+  // rather than an instruction to go and make a phone call.
+  function fallbackLinks(booking) {
+    var venue = booking.venue || '';
+    if (!venue) return [];
+    var links = [
+      { t: 'open', label: 'OpenTable', url: 'https://www.opentable.com/s?term=' + encodeURIComponent(venue) },
+      { t: 'open', label: 'Resy', url: 'https://resy.com/?query=' + encodeURIComponent(venue) },
+    ];
+    // Only offer to hold the slot when the time actually parsed — a calendar
+    // entry at a guessed hour is worse than none.
+    var when = booking.when ? new Date(booking.when) : null;
+    if (when && !isNaN(when.getTime()) && typeof gcalFmt === 'function') {
+      links.push({
+        t: 'open',
+        label: 'hold the evening',
+        url:
+          'https://calendar.google.com/calendar/render?action=TEMPLATE&text=' +
+          encodeURIComponent('Dinner: ' + venue) +
+          '&dates=' +
+          gcalFmt(when) +
+          '/' +
+          gcalFmt(new Date(when.getTime() + 7200000)),
+      });
+    }
+    return links;
+  }
+
   // Reads back as one line in the transcript, so the operator can see what was
   // asked for without opening anything.
   function summarise(b) {
@@ -134,12 +164,12 @@
               md: card.join('\n'),
               text: card.join('\n'),
               pre: null,
-              actions: dialable(f.phone)
-                ? [
-                    { t: 'open', label: 'call ' + (f.venue || 'the venue'), url: 'tel:' + dialable(f.phone) },
-                    { t: 'copy', label: 'copy call script' },
-                  ]
-                : [{ t: 'copy', label: 'copy call script' }],
+              actions: (dialable(f.phone)
+                ? [{ t: 'open', label: 'call ' + (f.venue || 'the venue'), url: 'tel:' + dialable(f.phone) }]
+                : []
+              )
+                .concat([{ t: 'copy', label: 'copy call script' }])
+                .concat(fallbackLinks(f)),
               t: Date.now(),
             });
 

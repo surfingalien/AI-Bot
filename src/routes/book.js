@@ -26,12 +26,18 @@ const str = (v) => (v == null ? '' : String(v).trim());
 // changed once already, and a rename should not read as a missing field.
 function readBooking(body) {
   const b = body || {};
+  // `name` is ambiguous across builds: alone it means the venue, but alongside
+  // an explicit venue key it means who the table is under. Resolving it by
+  // what else is present is the only reading that serves both — one desk build
+  // sends {restaurant, name} and lost the guest entirely under a flat alias
+  // list, so the script said "a table for 2" with nobody's name on it.
+  const namedVenue = b.venue || b.restaurant || b.place;
   return {
-    venue: str(b.venue || b.restaurant || b.name || b.place),
+    venue: str(namedVenue || b.name),
     phone: str(b.phone || b.number || b.tel),
     partySize: parseInt(b.partySize ?? b.party ?? b.people ?? b.seats, 10) || 0,
     when: str(b.when || b.time || b.datetime || b.date),
-    onBehalfOf: str(b.onBehalfOf || b.guest || b.contact),
+    onBehalfOf: str(b.onBehalfOf || b.guest || b.contact || (namedVenue ? b.name : '')),
     notes: str(b.notes || b.request || b.special),
   };
 }
