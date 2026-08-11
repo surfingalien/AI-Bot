@@ -52,6 +52,12 @@ async function freePort() {
 const closes = Array.from({ length: 320 }, (_, i) => 100 + i * 0.4 + Math.sin(i / 9) * 3);
 
 const stub = http.createServer((req, res) => {
+  let raw = '';
+  req.on('data', (c) => (raw += c));
+  req.on('end', () => handle(req, res, raw));
+});
+
+function handle(req, res, raw) {
   const json = (body, status = 200) => {
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(body));
@@ -59,7 +65,56 @@ const stub = http.createServer((req, res) => {
   if (req.url.startsWith('/emails')) return json({ id: 'stub-email' });
   if (req.url.startsWith('/hook')) return res.writeHead(200).end('ok');
   if (req.url.includes('/chat/completions')) {
-    return json({ choices: [{ message: { content: 'A short spoken answer. Momentum is fine.' } }] });
+    let body = {};
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      /* the route walk posts a minimal body; the desk posts a full one */
+    }
+    // The desk warms the brain with a non-streaming POST at boot. Answering
+    // that with SSE makes it conclude the brain is dead and route everything to
+    // its local agents, which quietly invalidates every model-backed check.
+    if (body.stream !== true) {
+      return json({ choices: [{ message: { content: 'A short spoken answer. Momentum is fine.' } }] });
+    }
+
+    const messages = body.messages || [];
+    const toolAlreadyRan = messages.some((m) => m.role === 'tool');
+    const asked = String(messages.filter((m) => m.role === 'user').pop()?.content || '');
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+    const sse = (o) => res.write(`data: ${JSON.stringify(o)}\n\n`);
+
+    if (/\bbook\b/i.test(asked) && !toolAlreadyRan) {
+      sse({
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_book_1',
+                  type: 'function',
+                  function: {
+                    name: 'book_restaurant',
+                    arguments: JSON.stringify({
+                      venue: 'Osteria Mozza',
+                      phone: '+1 (323) 297-0100',
+                      partySize: 4,
+                      when: 'Friday at 8pm',
+                      onBehalfOf: 'Suhas',
+                    }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      });
+    } else {
+      sse({ choices: [{ delta: { content: 'Done — details are above.' } }] });
+    }
+    res.write('data: [DONE]\n\n');
+    return res.end();
   }
   if (req.url.includes('/embeddings')) return json({ data: [{ embedding: [0.1, 0.2] }] });
   if (req.url.includes('/models')) return json({ data: [{ id: 'stub-model' }] });
@@ -86,7 +141,7 @@ const stub = http.createServer((req, res) => {
       ],
     },
   });
-});
+}
 
 // ── a real server process, booted the way a host boots it ───────────────────
 const children = [];

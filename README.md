@@ -48,7 +48,7 @@ the Settings panel. Add `BRAIN_BASE`/`BRAIN_KEY` to `.env` and the model brain
 is wired up too, with the key staying on the server.
 
 ```bash
-npm test                  # 170 tests, no network required
+npm test                  # 177 tests, no network required
 npm run validate          # boot a real server, walk every route
 npm run dev               # restart on change
 ```
@@ -450,6 +450,27 @@ calls to businesses are regulated differently depending on where the caller and
 the callee are. `/api/config` advertises `booking.configured` so the desk knows
 before it asks.
 
+The desk drives this through a `book_restaurant` tool the server adds to the
+engine (see below). Asking it to book a table produces a `Booking` message
+carrying the venue, the number, a one-tap `tel:` link and the exact words to
+say — posted as its own turn rather than left to the model's summary, because
+the model paraphrases and the point of the fallback is the *exact* words.
+
+### Tools the server adds to the desk
+
+`public/index.html` stays byte-for-byte as authored, so a newer desk build can
+be dropped in without a merge. The server's own tools live in
+`src/desk/engine-extensions.js` and are spliced onto the end of the `#engineSrc`
+block at serve time.
+
+They go *inside* that block rather than in a script tag of their own because
+the desk evaluates its engine with `new Function(src)` — the tool registry is
+closure-scoped, and a separate script can only see the window. Appending to the
+same source is the only way in. Registration is guarded by name, so a desk build
+that already ships one of these tools keeps its own version and nothing
+conflicts. If the block cannot be found, the file is served untouched rather
+than spliced on a guess.
+
 ### Why it used to feel slow
 
 The honest answer was the market feed, and it was bad: **a single quote cost
@@ -667,7 +688,8 @@ public/index.html      the desk, exactly as authored
 public/desk-server.js  SERVER panel: runtime status, goals, activity, sync
 src/server.js          boot, graceful shutdown
 src/app.js             routes, CORS, error handling
-src/ui.js              serves the desk with first-run defaults injected
+src/ui.js              serves the desk with defaults and server tools injected
+src/desk/              tools spliced into the desk engine's own scope
 src/config.js          env-driven configuration
 src/routes/            fetch · notify · yahoo · brain · autonomy · genome · voice
                        portfolio · predictions · analysis · book
@@ -677,7 +699,7 @@ src/lib/               safeFetch · auth · indicators · predictions · kelly �
                        email · speech · voiceBrief · portfolio · intent · notify
 scripts/validate.js    boot a real server against stubs and walk every route
 scripts/verify-feed.js check the live Yahoo chain end to end
-test/                  170 tests, no network required
+test/                  177 tests, no network required
 ```
 
 ## Notes on behaviour

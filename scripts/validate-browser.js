@@ -192,6 +192,28 @@ check(
   (spoken[0] || '').slice(0, 80),
 );
 
+console.log('\n  booking, end to end');
+// The server appends book_restaurant into the engine's own scope, so this also
+// proves the injection landed somewhere the tool loop can actually reach.
+// The panel is still open from the checks above and covers the composer.
+await page.locator('.sasrv-head .sasrv-x').click();
+await page.waitForTimeout(500);
+const composer = page.locator('#dinput');
+await composer.click();
+await composer.fill('book a table for 4 at Osteria Mozza on Friday at 8pm under Suhas');
+await page.keyboard.press('Enter');
+await page.waitForTimeout(6000);
+
+const log = await page.evaluate(() => document.querySelector('#pane-log')?.innerText || '');
+check('the model reaches the booking tool', /tools: book_restaurant/.test(log));
+check('an unconfigured server refuses out loud', /not configured/i.test(log));
+check(
+  'the call script survives to the screen',
+  /Read this out/.test(log) && /book a table for 4/i.test(log),
+  (log.match(/Read this out:[\s\S]{0,90}/) || [''])[0].replace(/\n/g, ' '),
+);
+check('and the venue is one tap from dialling', (await page.locator('a.chip[data-url^="tel:"]').count()) >= 1);
+
 console.log('\n  voice in');
 await page.evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true })));
 await page.waitForTimeout(400);
