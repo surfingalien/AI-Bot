@@ -62,20 +62,43 @@ export function callScript(booking) {
   return booking.notes ? `${ask} ${booking.notes}` : ask;
 }
 
+// An incomplete booking is not a malformed one. Answering "missing: venue,
+// phone" tells a developer what went wrong and tells the person at the desk
+// nothing — so each gap carries the question to actually ask them, one at a
+// time, in the order a person would ask.
+const SLOTS = [
+  { key: 'venue', question: 'Which restaurant should I call?' },
+  { key: 'phone', question: "What's their number?" },
+  { key: 'partySize', question: 'For how many people?' },
+  { key: 'when', question: 'What day and time?' },
+];
+
+function missingSlots(booking) {
+  return SLOTS.filter((s) => !booking[s.key]).map((s) => s.key);
+}
+
 bookRouter.post('/book', rateLimit({ name: 'book', max: 10 }), (req, res) => {
   const booking = readBooking(req.body);
 
-  // Validated before the capability check on purpose: a malformed request is a
-  // client bug whether or not Twilio is wired up, and the answer should not
-  // change the day it is.
-  const missing = [];
-  if (!booking.venue) missing.push('venue');
-  if (!booking.phone) missing.push('phone');
-  if (missing.length) {
-    return res.status(400).json({ ok: false, error: `missing: ${missing.join(', ')}` });
-  }
-  if (!phoneUsable(booking.phone)) {
+  // A phone number that is present but unusable is a different failure from one
+  // that was never given: no question to the user fixes "555-CALL", so it stays
+  // a 400 rather than becoming something to ask about.
+  if (booking.phone && !phoneUsable(booking.phone)) {
     return res.status(400).json({ ok: false, error: `unusable phone number: ${booking.phone}` });
+  }
+
+  const needs = missingSlots(booking);
+  if (needs.length) {
+    const next = SLOTS.find((s) => s.key === needs[0]);
+    return res.status(422).json({
+      ok: false,
+      stage: 'incomplete',
+      needs,
+      question: next.question,
+      // Echoed so the caller can keep collecting without re-deriving what it
+      // already established.
+      booking,
+    });
   }
 
   if (!bookingConfigured()) {
@@ -91,9 +114,28 @@ bookRouter.post('/book', rateLimit({ name: 'book', max: 10 }), (req, res) => {
     });
   }
 
-  // Reached only once the three variables are set. Left unimplemented rather
-  // than half-implemented: a call that dials and then cannot be supervised is
-  // worse than no call.
+  // Reached only when the server can actually dial. Placing a phone call to a
+  // real business is not undoable — the restaurant's phone rings either way —
+  // so the complete booking is read back and nothing happens until the caller
+  // returns `confirm: true`. The gate is stateless on purpose: no server-side
+  // session to expire, to leak between users, or to disagree with itself when
+  // a second replica exists.
+  if (req.body?.confirm !== true) {
+    return res.json({
+      ok: true,
+      stage: 'confirm',
+      configured: true,
+      provider: config.booking.provider,
+      booking,
+      script: callScript(booking),
+      question:
+        `Call ${booking.venue} to book ${booking.partySize ? `for ${booking.partySize} ` : ''}` +
+        `${booking.when}? Send the same booking back with confirm: true.`,
+    });
+  }
+
+  // Left unimplemented rather than half-implemented: a call that dials and then
+  // cannot be supervised is worse than no call.
   return res.status(501).json({
     ok: false,
     configured: true,

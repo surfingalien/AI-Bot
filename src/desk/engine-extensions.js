@@ -98,9 +98,11 @@
   register({
     name: 'book_restaurant',
     desc:
-      'BOOK A TABLE by having the server phone the venue. Provide venue and phone; ' +
-      'partySize, when, onBehalfOf and notes are optional. If the server cannot place ' +
-      'calls it returns a script to read out, which you should show the user verbatim.',
+      'BOOK A TABLE by having the server phone the venue. Needs venue, phone, partySize and when. ' +
+      'If any are missing the server replies with the single next question to ask — ask the user ' +
+      'that one question, do not invent the answer. When everything is known the server reads the ' +
+      'booking back for approval; call again with confirm=true only after the user agrees. If the ' +
+      'server cannot place calls it returns a script to read out, which you should show verbatim.',
     p: {
       venue: 'string',
       phone: 'string',
@@ -108,6 +110,7 @@
       when: 'string',
       onBehalfOf: 'string',
       notes: 'string',
+      confirm: 'boolean',
     },
     exec: function (a, ctx) {
       if (!S.dataBase) return 'booking needs the DATA PROXY';
@@ -118,6 +121,7 @@
         when: String(a.when || ''),
         onBehalfOf: String(a.onBehalfOf || ''),
         notes: String(a.notes || ''),
+        confirm: a.confirm === true,
       };
 
       return proxy('/api/book', {
@@ -132,6 +136,32 @@
           if (res.status === 400) {
             ctx.actions.push({ t: 'stat', label: 'booking incomplete' });
             return '**I need more before I can call.** ' + (j.error || 'the booking is incomplete') + '.';
+          }
+
+          // Incomplete, not wrong. The server names the one thing to ask for
+          // next, so the desk asks that instead of listing every empty field —
+          // a person collecting a booking asks one question at a time.
+          if (res.status === 422) {
+            ctx.actions.push({ t: 'stat', label: 'still need: ' + (j.needs || []).join(', ') });
+            return j.question || 'What else should I know before I call?';
+          }
+
+          // Complete and dialable, so nothing happens until the operator says
+          // so. Returned as a question rather than performed as an action.
+          if (res.status === 200 && j.stage === 'confirm') {
+            ctx.actions.push({ t: 'stat', label: 'waiting on confirmation' });
+            var b = j.booking || booking;
+            return [
+              '**Ready to call ' + b.venue + '.**',
+              '',
+              '- ' + (b.phone || 'no number'),
+              '- ' + (b.partySize ? b.partySize + ' people' : 'party size unknown') + ', ' + (b.when || 'time unknown'),
+              b.onBehalfOf ? '- under ' + b.onBehalfOf : '',
+              '',
+              'Say **confirm** and I will place the call.',
+            ]
+              .filter(Boolean)
+              .join('\n');
           }
 
           // The server has no voice line. This is the path that matters: say so

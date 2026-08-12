@@ -48,7 +48,7 @@ the Settings panel. Add `BRAIN_BASE`/`BRAIN_KEY` to `.env` and the model brain
 is wired up too, with the key staying on the server.
 
 ```bash
-npm test                  # 177 tests, no network required
+npm test                  # 185 tests, no network required
 npm run validate          # boot a real server, walk every route
 npm run dev               # restart on change
 ```
@@ -432,10 +432,35 @@ yourself" script when the call cannot be placed. That degradation is right; what
 was wrong is that an unimplemented route 404s, which the desk cannot tell apart
 from a typo, a proxy eating the path, or a server older than the client.
 
-So the route exists and refuses honestly. It validates the request first — a
-malformed booking is a `400` whether or not Twilio is wired up — then answers
-`501` naming the three variables that are unset, and returns the booking back
-with a ready-to-read script:
+So the route exists and refuses honestly, and it distinguishes three different
+situations that a single `400` used to flatten together.
+
+**Incomplete** is not malformed. A booking missing the party size is not a
+client bug — it is a question nobody has asked the user yet, so the server
+answers `422` with the one thing to ask next rather than a list of empty
+fields:
+
+```json
+{ "stage": "incomplete", "needs": ["partySize", "when"],
+  "question": "For how many people?",
+  "booking": { "venue": "Nobu", "phone": "+13232970100" } }
+```
+
+One question at a time, in the order a person would ask them, with what is
+already known echoed back so the caller never re-derives it. A phone number
+that is present but unusable stays a `400` — no question to the user fixes
+`555-CALL`.
+
+**Complete, and the server can dial.** Placing a call to a real business is not
+undoable: the restaurant's phone rings whether or not the operator meant it. So
+the booking is read back and nothing happens until the same request returns
+with `confirm: true`. The gate is stateless — no server-side session to expire,
+to leak between users, or to disagree with itself when a second replica exists
+— and only the boolean opens it, because `confirm: "yes"` is a client bug
+rather than consent.
+
+**Complete, and it cannot dial.** Answers `501` naming the three variables that
+are unset, and returns the booking with a ready-to-read script:
 
 ```json
 { "ok": false, "configured": false,
@@ -699,7 +724,7 @@ src/lib/               safeFetch · auth · indicators · predictions · kelly �
                        email · speech · voiceBrief · portfolio · intent · notify
 scripts/validate.js    boot a real server against stubs and walk every route
 scripts/verify-feed.js check the live Yahoo chain end to end
-test/                  177 tests, no network required
+test/                  185 tests, no network required
 ```
 
 ## Notes on behaviour

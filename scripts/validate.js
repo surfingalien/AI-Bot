@@ -316,7 +316,18 @@ try {
     body: { venue: 'Osteria Mozza', phone: '+13232970100', partySize: 4, when: 'Friday 8pm' },
     expect: [501],
   });
-  await hit('a malformed booking is a 400', 'POST', '/api/book', { body: { venue: 'X' }, expect: [400] });
+  const incomplete = await hit('an incomplete booking asks a question', 'POST', '/api/book', {
+    body: { venue: 'X' },
+    expect: [422],
+  });
+  if (incomplete) {
+    const j = await incomplete.json();
+    record('and names one thing to ask for', Boolean(j.question) && j.needs?.[0] === 'phone', j.question);
+  }
+  await hit('an unusable phone is a 400', 'POST', '/api/book', {
+    body: { venue: 'X', phone: '555-CALL', partySize: 2, when: 'Friday' },
+    expect: [400],
+  });
   await hit('call status', 'GET', '/api/book/status/CA123', { expect: [501] });
 
   console.log('\n── reports out ──');
