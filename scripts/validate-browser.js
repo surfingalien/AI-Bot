@@ -82,6 +82,13 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
 
+// Counted rather than inspected: whether a translation happened early is a
+// question about when a request left, which the page itself cannot answer.
+const intentCalls = [];
+page.on('request', (r) => {
+  if (r.url().includes('/api/intent')) intentCalls.push(Date.now());
+});
+
 // Chromium ships neither speech synthesis nor recognition, so both are stood
 // in for before anything loads. The stand-ins record rather than simulate: what
 // is being checked is what the desk *asked* to have spoken.
@@ -102,6 +109,13 @@ await page.addInitScript(() => {
     }
     start() {}
     stop() {}
+    // What the recogniser reports while someone is still talking: the same
+    // shape as a final result, minus the commitment.
+    __hear(text) {
+      const entry = [{ transcript: text, confidence: 1 }];
+      entry.isFinal = false;
+      this._emit('result', { resultIndex: 0, results: [entry] });
+    }
     __say(text) {
       const entry = [{ transcript: text, confidence: 1 }];
       entry.isFinal = true;
@@ -243,6 +257,69 @@ const turn = await page.evaluate(() => {
   return u ? u.innerText.replace(/\n/g, ' ') : '';
 });
 check('spoken English becomes a command', /positions/i.test(turn), turn.slice(0, 60));
+
+console.log('\n  voice in, before the sentence ends');
+// A phrasing the fast path cannot place, so the translation behind it is a
+// model call — the latency this is meant to hide. Timed rather than merely
+// present: a check on the outcome alone would pass on the implementation that
+// waits for silence before it starts.
+const before = intentCalls.length;
+await page.evaluate(() =>
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true })),
+);
+await page.waitForTimeout(400);
+await page.evaluate(() => window.__recs.at(-1)?.__hear('what is going on with data center demand'));
+await page.waitForTimeout(1000); // past the settle window, still mid-utterance
+const early = intentCalls.length - before;
+check('the translation starts while the operator is still talking', early === 1, `${early} request(s)`);
+
+// Capitalised and stopped, the way a recogniser commits a final transcript.
+// Same words, so the answer already in flight is the answer to this.
+await page.evaluate(() => window.__recs.at(-1)?.__say('What is going on with data center demand.'));
+await page.waitForTimeout(2500);
+check(
+  'and the finished transcript reuses it rather than asking again',
+  intentCalls.length - before === 1,
+  `${intentCalls.length - before} request(s) for one utterance`,
+);
+const guessed = await page.evaluate(() => {
+  const u = [...document.querySelectorAll('.turn .u')].pop();
+  return u ? u.innerText.replace(/\n/g, ' ') : '';
+});
+// The guess was asked about the interim wording; what runs is the final one,
+// because an untranslated command is only ever the words back.
+check(
+  'and what runs is the transcript as finally heard',
+  /What is going on with data center demand\./.test(guessed),
+  guessed.slice(0, 70),
+);
+
+console.log('\n  voice in, when the guess was wrong');
+// Carrying on past the pause changes the words, and an answer about the old
+// ones would run the wrong command. It has to be dropped and asked again.
+const restart = intentCalls.length;
+await page.evaluate(() =>
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true })),
+);
+await page.waitForTimeout(400);
+await page.evaluate(() => window.__recs.at(-1)?.__hear('tell me about nvidia'));
+await page.waitForTimeout(1000);
+await page.evaluate(() => window.__recs.at(-1)?.__say('tell me about nvidia data centers'));
+await page.waitForTimeout(2500);
+check(
+  'a stale guess is thrown away and the question asked properly',
+  intentCalls.length - restart === 2,
+  `${intentCalls.length - restart} request(s)`,
+);
+const corrected = await page.evaluate(() => {
+  const u = [...document.querySelectorAll('.turn .u')].pop();
+  return u ? u.innerText.replace(/\n/g, ' ') : '';
+});
+check(
+  'and the subject the operator added survives',
+  /data center/i.test(corrected),
+  corrected.slice(0, 70),
+);
 
 check('no uncaught page errors', errors.length === 0, errors.slice(0, 2).join(' | '));
 
