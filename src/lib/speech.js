@@ -10,7 +10,9 @@
 // model path in routes/voice.js does the better job when a brain is available;
 // this is what answers when it is not, and it never fails or costs anything.
 
-const MAX_SENTENCES = 4;
+// The ceiling both paths share: the prompt asks for 2 to 4 sentences, and the
+// shaper enforces it whether or not a model was involved.
+export const MAX_SENTENCES = 4;
 const MAX_CHARS = 420;
 
 /** "1234567" -> "1.2 million" — magnitudes people say out loud. */
@@ -131,7 +133,12 @@ function dropStructuralLines(text, { hasVerdict }) {
     .join('\n');
 }
 
-function sentences(text) {
+/**
+ * Split on sentence boundaries. Exported because the streaming path needs the
+ * same notion of "a whole sentence" the shaper uses — a synthesiser handed
+ * half a clause reads it with the wrong intonation and cannot take it back.
+ */
+export function splitSentences(text) {
   return String(text)
     .split(/(?<=[.!?])\s+/)
     .map((s) => s.trim())
@@ -170,7 +177,7 @@ export function toSpeech(text, meta = {}) {
   const body = humanizeNumbers(
     stripMarkup(dropStructuralLines(raw, { hasVerdict: Boolean(verdict) })),
   );
-  const picked = sentences(body)
+  const picked = splitSentences(body)
     // Drop residue that reads as noise: bare labels, stubs, disclaimer lines.
     .filter((s) => s.split(/\s+/).length >= 4)
     .filter((s) => !/^not financial advice/i.test(s))

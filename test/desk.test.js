@@ -84,7 +84,45 @@ test('the panel stays inert when the server does not answer', () => {
 test('speech interception restores the desk behaviour when the rewrite fails', () => {
   // A server that goes away mid-session must not leave the desk mute.
   assert.match(panel, /voiceMode === 'verbatim' \|\| !text\) return original\(utterance\)/);
-  assert.match(panel, /speakScript\(text, utterance, original, 'raw'\)/);
+  assert.match(panel, /emit\(text, 'raw'\)/);
   // Stale rewrites are dropped rather than spoken after a newer answer.
-  assert.match(panel, /if \(ticket !== speakSeq\) return;/);
+  assert.match(panel, /if \(ticket !== speakSeq \|\| !script\) return;/);
+});
+
+test('the brief is spoken as it streams, not once it is finished', () => {
+  // The request has to ask for a stream, and has to be able to read one.
+  assert.match(panel, /stream: true/);
+  assert.match(panel, /Accept: 'text\/event-stream'/);
+  assert.match(panel, /r\.body\.getReader\(\)/);
+
+  // Frames are only parsed once whole: an SSE frame ends at a blank line, and
+  // a network chunk lands wherever it lands.
+  assert.match(panel, /buf\.indexOf\('\\n\\n'\)/);
+
+  // Every speakable event reaches synthesis, and each one is spoken on its own
+  // rather than accumulated — that is the whole point of streaming.
+  assert.match(panel, /ev\.type === 'lead' \|\| ev\.type === 'sentence' \|\| ev\.type === 'fallback'/);
+
+  // A server that cannot stream still answers with the whole script, and that
+  // is what the client falls back to rather than going mute.
+  assert.match(panel, /return r\.json\(\)\.then/);
+  assert.match(panel, /text\/event-stream'\) === 0/);
+
+  // Abandoning the read is what tells the server to stop generating.
+  assert.match(panel, /reader\.cancel\(\)/);
+});
+
+test('the desk stops talking when the operator starts', () => {
+  // Barge-in: both the mic opening and speech actually starting cancel what is
+  // queued, and both void the brief still in flight so it cannot arrive later.
+  assert.match(panel, /function bargeIn\(\)/);
+  assert.match(panel, /window\.speechSynthesis\.cancel\(\)/);
+  assert.match(panel, /rec\.addEventListener\('start', bargeIn\)/);
+  assert.match(panel, /rec\.addEventListener\('speechstart', bargeIn\)/);
+
+  const barge = panel.slice(panel.indexOf('function bargeIn()'));
+  assert.ok(
+    barge.indexOf('speakSeq++') < barge.indexOf('speechSynthesis.cancel()'),
+    'the ticket is claimed before the queue is cleared, so nothing slips in between',
+  );
 });

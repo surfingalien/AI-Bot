@@ -8,8 +8,16 @@
 
 import crypto from 'node:crypto';
 import { config, brainConfigured } from '../config.js';
-import { complete } from '../brain/client.js';
-import { needsRewrite, toSpeech } from './speech.js';
+import { complete, completeStream } from '../brain/client.js';
+import {
+  MAX_SENTENCES,
+  extractVerdict,
+  humanizeNumbers,
+  needsRewrite,
+  splitSentences,
+  stripMarkup,
+  toSpeech,
+} from './speech.js';
 import { log } from './log.js';
 
 // Every line here is a constraint the caller cannot recover from on its own:
@@ -53,6 +61,13 @@ export function clearVoiceCache() {
   cache.clear();
 }
 
+/** Keep a finished script, evicting the oldest once the map is full. */
+function remember(key, value) {
+  cache.set(key, { ...value, ts: Date.now() });
+  if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
+  return value;
+}
+
 /**
  * Rewrite written analysis into a spoken script.
  *
@@ -85,13 +100,7 @@ export async function briefFor(text, options = {}) {
 
   const fallback = toSpeech(input, { title });
 
-  const remember = (value) => {
-    cache.set(key, { ...value, ts: Date.now() });
-    if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
-    return value;
-  };
-
-  if (!brainConfigured()) return remember({ script: fallback, source: 'rules' });
+  if (!brainConfigured()) return remember(key, { script: fallback, source: 'rules' });
 
   try {
     // Waiting on the model is the whole latency budget for speech. Past the
@@ -108,24 +117,197 @@ export async function briefFor(text, options = {}) {
       log.debug('voice brief exceeded its deadline, speaking the rules script');
       return { script: fallback, source: 'rules-timeout' };
     }
-    return remember({ script: raced || fallback, source: 'model' });
+    return remember(key, { script: raced || fallback, source: 'model' });
   } catch (err) {
     log.warn(`voice brief fell back to rules: ${err?.message || err}`);
-    return remember({ script: fallback, source: 'rules' });
+    return remember(key, { script: fallback, source: 'rules' });
+  }
+}
+
+/** The two messages both the whole-script and the streaming path send up. */
+function briefMessages(input, title, style) {
+  return [
+    { role: 'system', content: style === 'alert' ? ALERT_PROMPT : VOICE_PROMPT },
+    {
+      role: 'user',
+      content: `${title ? `Subject: ${title}\n\n` : ''}Written analysis:\n${input.slice(0, 6000)}`,
+    },
+  ];
+}
+
+// The leading complete sentence of a partial buffer, with the whitespace that
+// proves it ended. Deliberately the same boundary `splitSentences` uses, so a
+// streamed brief breaks where a whole one would.
+const SENTENCE_END = /^([\s\S]*?[.!?])(\s+)/;
+
+/** One sentence of model output, shaped the way the whole script would be. */
+function shapeSentence(text) {
+  return humanizeNumbers(stripMarkup(text)).trim();
+}
+
+/** What is left of a script once its opening sentence has already been said. */
+function afterLead(script) {
+  const parts = splitSentences(script);
+  return parts.length > 1 ? parts.slice(1).join(' ') : '';
+}
+
+/**
+ * The same brief, sentence by sentence, for callers that can start speaking
+ * before the model has finished writing.
+ *
+ * Emits, in order:
+ *   { type:'lead',     script }  — say this now; derived, not generated
+ *   { type:'sentence', script }  — the model's, as each one completes
+ *   { type:'fallback', script }  — say this instead; never follows a sentence
+ *   { type:'done',     source }  — nothing further is coming
+ *
+ * The ordering guarantee is what keeps the consumer trivial: a `fallback` only
+ * ever arrives when no `sentence` has, so nothing can be said twice.
+ *
+ * @param {string} text
+ * @param {{title?:string, style?:'brief'|'alert', skipPassthrough?:boolean, signal?:AbortSignal}} [options]
+ */
+export async function* briefStream(text, options = {}) {
+  const input = String(text || '').trim();
+  if (!input) return;
+
+  const style = options.style === 'alert' ? 'alert' : 'brief';
+  const title = options.title || '';
+
+  // Already speech: a reminder, or the desk's own one-liner. There is nothing
+  // to stream and nothing to wait for.
+  if (!options.skipPassthrough && !needsRewrite(input)) {
+    yield { type: 'fallback', script: input, source: 'passthrough' };
+    yield { type: 'done', source: 'passthrough' };
+    return;
+  }
+
+  const key = cacheKey(input, style);
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.ts <= CACHE_TTL_MS) {
+    yield { type: 'fallback', script: hit.script, source: hit.source, cached: true };
+    yield { type: 'done', source: hit.source, cached: true };
+    return;
+  }
+  if (hit) cache.delete(key);
+
+  const fallback = toSpeech(input, { title });
+
+  if (!brainConfigured()) {
+    remember(key, { script: fallback, source: 'rules' });
+    yield { type: 'fallback', script: fallback, source: 'rules' };
+    yield { type: 'done', source: 'rules' };
+    return;
+  }
+
+  // A verdict line is the one opener that costs nothing and is still true: it
+  // is read off the source rather than written about it, so it is available at
+  // the instant the request arrives. Saying it immediately is what removes the
+  // dead air; the model's own lead is then dropped, because the prompt fixes
+  // the shape — lead, then reasons — and the reasons still read as one brief.
+  //
+  // With no verdict there is no trustworthy instant opener, and inventing one
+  // out of the first line of the source would be worse than a short wait.
+  const verdict = style === 'brief' ? extractVerdict(input) : null;
+  const lead = verdict ? verdict.sentence : null;
+  if (lead) yield { type: 'lead', script: lead };
+
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (options.signal) {
+    if (options.signal.aborted) controller.abort();
+    else options.signal.addEventListener('abort', onAbort, { once: true });
+  }
+
+  const spoken = [];
+  let said = lead ? 1 : 0;
+  let dropLead = Boolean(lead); // the model's opener duplicates one we just gave
+  let buffer = '';
+  let timedOut = false;
+
+  // Nothing is being said yet unless a lead went out, so the tolerable wait is
+  // the short one. Where there is already audio, the old deadline still holds.
+  const budget = lead ? config.voice.deadlineMs : config.voice.firstSentenceMs;
+  const timer = setTimeout(() => {
+    if (spoken.length === 0) {
+      timedOut = true;
+      controller.abort();
+    }
+  }, budget);
+  if (timer.unref) timer.unref();
+
+  const emit = (sentence) => {
+    const shaped = shapeSentence(sentence);
+    if (!shaped) return null;
+    if (dropLead) {
+      dropLead = false;
+      return null;
+    }
+    if (said >= MAX_SENTENCES) return null;
+    said += 1;
+    spoken.push(shaped);
+    return { type: 'sentence', script: shaped };
+  };
+
+  try {
+    for await (const delta of completeStream(briefMessages(input, title, style), {
+      temperature: 0.4,
+      maxTokens: style === 'alert' ? 80 : 160,
+      signal: controller.signal,
+    })) {
+      buffer += delta;
+
+      // A sentence is only known to be finished once whitespace follows it, so
+      // whatever trails the last boundary is held back as possibly-incomplete.
+      // The buffer is sliced rather than rebuilt from the pieces: the
+      // whitespace between sentences is the only evidence a boundary exists,
+      // and reassembling the remainder would throw it away.
+      let boundary;
+      while ((boundary = SENTENCE_END.exec(buffer)) !== null) {
+        const whole = boundary[1];
+        buffer = buffer.slice(boundary[0].length);
+        const event = emit(whole);
+        if (event) yield event;
+      }
+      if (said >= MAX_SENTENCES) break;
+    }
+
+    // Whatever is left has no trailing whitespace to mark its end — it is the
+    // last sentence, and dropping it would truncate the brief.
+    const tail = emit(buffer);
+    if (tail) yield tail;
+
+    const script = [lead, ...spoken].filter(Boolean).join(' ').trim();
+    if (script) remember(key, { script, source: 'model' });
+    yield { type: 'done', source: spoken.length ? 'model' : 'lead-only' };
+  } catch (err) {
+    if (options.signal?.aborted) return; // the listener left; say nothing
+
+    const source = timedOut ? 'rules-timeout' : 'rules';
+    if (spoken.length === 0) {
+      // Nothing of the model's has been said, so the rules script can still
+      // stand in whole — minus the lead, if that already went out.
+      log.debug(`voice brief stream fell back to rules: ${timedOut ? 'deadline' : err?.message || err}`);
+      const rest = lead ? afterLead(fallback) : fallback;
+      if (rest) yield { type: 'fallback', script: rest, source };
+      yield { type: 'done', source };
+      return;
+    }
+    // Some of the model's brief is already spoken. Appending the rules script
+    // now would say the same thing twice, so this stops where it is.
+    log.warn(`voice brief stream ended early: ${err?.message || err}`);
+    yield { type: 'done', source: 'model-partial' };
+  } finally {
+    clearTimeout(timer);
+    if (options.signal) options.signal.removeEventListener('abort', onAbort);
   }
 }
 
 async function modelBrief(input, title, style) {
-  const raw = await complete(
-    [
-      { role: 'system', content: style === 'alert' ? ALERT_PROMPT : VOICE_PROMPT },
-      {
-        role: 'user',
-        content: `${title ? `Subject: ${title}\n\n` : ''}Written analysis:\n${input.slice(0, 6000)}`,
-      },
-    ],
-    { temperature: 0.4, maxTokens: style === 'alert' ? 80 : 160 },
-  );
+  const raw = await complete(briefMessages(input, title, style), {
+    temperature: 0.4,
+    maxTokens: style === 'alert' ? 80 : 160,
+  });
 
   // A model that ignores the brief and answers in markdown would defeat it.
   return toSpeech(raw);
