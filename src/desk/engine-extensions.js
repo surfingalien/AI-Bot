@@ -142,7 +142,12 @@
           // next, so the desk asks that instead of listing every empty field —
           // a person collecting a booking asks one question at a time.
           if (res.status === 422) {
-            ctx.actions.push({ t: 'stat', label: 'still need: ' + (j.needs || []).join(', ') });
+            // The chip carries the question itself, not the field names behind
+            // it. `still need: partySize, when` is the same developer-speak the
+            // server stopped emitting, and it is the one line guaranteed to
+            // reach the screen — the tool's return value only gets there if the
+            // model chooses to relay it.
+            ctx.actions.push({ t: 'stat', label: j.question || 'more detail needed' });
             return j.question || 'What else should I know before I call?';
           }
 
