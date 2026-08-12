@@ -138,6 +138,11 @@ export const config = {
     // How long speech may wait on the model before the rules script is spoken
     // instead. Silence while a brief is written is worse than a plainer brief.
     deadlineMs: int(env.VOICE_DEADLINE_MS, 2500),
+    // The streaming path's budget, and much tighter, because it only has to
+    // cover the first sentence rather than the whole brief. It applies while
+    // nothing is being said; once there is audio, the wait above governs, since
+    // a listener who is being spoken to is not waiting on anything.
+    firstSentenceMs: int(env.VOICE_FIRST_SENTENCE_MS, 700),
   },
 
   booking: {

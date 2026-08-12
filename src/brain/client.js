@@ -76,6 +76,80 @@ export async function complete(messages, options = {}) {
   return content;
 }
 
+/**
+ * Streaming completion. Yields assistant text as it arrives, rather than the
+ * whole message once it is finished.
+ *
+ * This exists for speech. A spoken brief read out of `complete()` cannot begin
+ * until the last token lands, so the operator hears nothing for as long as the
+ * model takes to write four sentences — where what they actually need is the
+ * first one. Everything that reads on a screen should keep using `complete()`;
+ * a reader can wait, a listener cannot.
+ *
+ * @param {Array<{role:string, content:string}>} messages
+ * @param {{model?:string, temperature?:number, maxTokens?:number, signal?:AbortSignal}} [options]
+ * @yields {string} content deltas, in order
+ */
+export async function* completeStream(messages, options = {}) {
+  const body = {
+    model: options.model || config.brain.model,
+    messages,
+    stream: true,
+    ...(options.temperature != null ? { temperature: options.temperature } : {}),
+    ...(options.maxTokens != null ? { max_tokens: options.maxTokens } : {}),
+  };
+
+  let response;
+  try {
+    response = await brainRequest(body, {
+      headers: { Accept: 'text/event-stream' },
+      signal: options.signal,
+    });
+  } catch (err) {
+    if (err instanceof BrainError) throw err;
+    if (err?.name === 'TimeoutError') throw new BrainError('model brain timeout', 504);
+    throw new BrainError(`model brain unreachable: ${err?.message || err}`, 502);
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new BrainError(`model brain HTTP ${response.status}: ${text.slice(0, 200)}`, 502);
+  }
+  if (!response.body) throw new BrainError('model brain returned no stream', 502);
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  for await (const chunk of response.body) {
+    buffer += decoder.decode(chunk, { stream: true });
+
+    // A network chunk lands wherever it lands, which is routinely mid-frame.
+    // Only whole lines are consumed; the remainder waits for the next chunk.
+    let cut;
+    while ((cut = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, cut).trim();
+      buffer = buffer.slice(cut + 1);
+      if (!line.startsWith('data:')) continue; // comments, keep-alives, event: lines
+
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') return;
+
+      let json;
+      try {
+        json = JSON.parse(payload);
+      } catch {
+        continue; // not every provider's frames are ours to understand
+      }
+      // An error delivered inside the stream is still an error.
+      if (json?.error) {
+        throw new BrainError(`model brain stream error: ${json.error.message || 'unknown'}`, 502);
+      }
+      const delta = json?.choices?.[0]?.delta?.content;
+      if (typeof delta === 'string' && delta) yield delta;
+    }
+  }
+}
+
 /** Cheap liveness probe used by /api/config consumers and tests. */
 export async function probe() {
   if (!brainConfigured()) return { ok: false, error: 'not configured' };

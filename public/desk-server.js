@@ -164,30 +164,106 @@
       // Claim a ticket. If the desk starts saying something newer while the
       // rewrite is in flight, the stale one is dropped rather than queued —
       // hearing the previous answer after the current one is worse than
-      // silence.
+      // silence. Barge-in claims a ticket the same way, which is what stops a
+      // brief still in flight from arriving over someone who is talking.
       var ticket = ++speakSeq;
-
-      api('/api/voice/brief', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: text, title: document.title }),
-      })
-        .then(function (res) {
-          if (ticket !== speakSeq) return;
-          var script = res.json && res.json.ok && res.json.script;
-          speakScript(script || text, utterance, original, (res.json && res.json.source) || 'raw');
-        })
-        .catch(function () {
-          if (ticket !== speakSeq) return;
-          // Server unreachable mid-session: better the old behaviour than none.
-          speakScript(text, utterance, original, 'raw');
-        });
+      streamBrief(text, ticket, utterance, original);
     };
   }
 
-  function speakScript(script, source, original, kind) {
-    lastScript = { text: script, source: kind, t: Date.now() };
-    renderVoice();
+  /*
+   * The brief arrives a sentence at a time and is spoken a sentence at a time.
+   * Waiting for the whole script meant the first word came after the last
+   * token; synthesis has its own queue, so handing it sentences in order
+   * sounds identical and starts roughly a full brief sooner.
+   */
+  function streamBrief(text, ticket, source, original) {
+    var said = [];
+    var spoke = false;
+
+    function emit(script, kind) {
+      if (ticket !== speakSeq || !script) return;
+      spoke = true;
+      said.push(script);
+      lastScript = { text: said.join(' '), source: kind || 'model', t: Date.now() };
+      renderVoice();
+      utter(script, source, original);
+    }
+
+    function readStream(reader) {
+      var decoder = new TextDecoder();
+      var buf = '';
+
+      function drain() {
+        var cut;
+        while ((cut = buf.indexOf('\n\n')) !== -1) {
+          var frame = buf.slice(0, cut);
+          buf = buf.slice(cut + 2);
+          var payload = frame.replace(/^data:\s?/, '').trim();
+          if (!payload) continue;
+          var ev;
+          try {
+            ev = JSON.parse(payload);
+          } catch (e) {
+            continue;
+          }
+          if (ev.type === 'lead' || ev.type === 'sentence' || ev.type === 'fallback') {
+            emit(ev.script, ev.type === 'sentence' ? ev.source || 'model' : ev.source || ev.type);
+          }
+        }
+      }
+
+      function step() {
+        return reader.read().then(function (chunk) {
+          // Superseded — stop reading, which closes the response and lets the
+          // server abandon the model call rather than finish it for nobody.
+          if (ticket !== speakSeq) {
+            try {
+              reader.cancel();
+            } catch (e) {
+              /* already closed */
+            }
+            return undefined;
+          }
+          if (chunk.done) {
+            buf += decoder.decode();
+            drain();
+            return undefined;
+          }
+          buf += decoder.decode(chunk.value, { stream: true });
+          drain();
+          return step();
+        });
+      }
+
+      return step();
+    }
+
+    fetch(API + '/api/voice/brief', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify({ text: text, title: document.title, stream: true }),
+    })
+      .then(function (r) {
+        var type = r.headers.get('content-type') || '';
+        if (r.ok && r.body && r.body.getReader && type.indexOf('text/event-stream') === 0) {
+          return readStream(r.body.getReader());
+        }
+        // A server that predates streaming still answers with the whole
+        // script, so the old behaviour is what a mismatch degrades to.
+        return r.json().then(function (j) {
+          emit((j && j.ok && j.script) || text, (j && j.source) || 'raw');
+        });
+      })
+      .catch(function () {
+        // Nothing reached the operator and nothing is coming. The unshaped
+        // text is a poor brief, but it is the one outcome better than silence.
+        if (ticket !== speakSeq || spoke) return;
+        emit(text, 'raw');
+      });
+  }
+
+  function utter(script, source, original) {
     try {
       var u = new SpeechSynthesisUtterance(script);
       // A briefing reads a touch slower than a data dump; keep whatever the
@@ -220,6 +296,24 @@
       var deskResult = null;
       var deskEnd = null;
       var heard = '';
+
+      // Barge-in. The moment the operator starts talking, whatever the desk is
+      // saying is an answer to the previous question — and worse, it is going
+      // into the microphone that is now open. Cancelling clears the queued
+      // sentences the streaming path put there; claiming a ticket voids the
+      // brief still in flight, so it cannot arrive later and start speaking
+      // over them.
+      function bargeIn() {
+        speakSeq++;
+        try {
+          window.speechSynthesis.cancel();
+        } catch (e) {
+          /* no synthesiser here; nothing was being said anyway */
+        }
+      }
+
+      rec.addEventListener('start', bargeIn);
+      rec.addEventListener('speechstart', bargeIn);
 
       rec.addEventListener('result', function (e) {
         // Track the final transcript ourselves; the desk's copy is rebuilt
