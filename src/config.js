@@ -143,6 +143,13 @@ export const config = {
     // nothing is being said; once there is audio, the wait above governs, since
     // a listener who is being spoken to is not waiting on anything.
     firstSentenceMs: int(env.VOICE_FIRST_SENTENCE_MS, 700),
+    // How long a model call made on someone's behalf mid-utterance may take
+    // before it is abandoned. Deliberately not `brain.timeoutMs`: two minutes
+    // is a sane ceiling for a dossier being written to a screen and absurd for
+    // a person standing at a microphone, where the request is worthless long
+    // before it expires. Nothing here degrades badly on expiry — a brief falls
+    // back to the rules script, an intent passes through as spoken.
+    brainTimeoutMs: int(env.VOICE_BRAIN_TIMEOUT_MS, 8000),
   },
 
   booking: {

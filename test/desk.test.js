@@ -112,6 +112,23 @@ test('the brief is spoken as it streams, not once it is finished', () => {
   assert.match(panel, /reader\.cancel\(\)/);
 });
 
+test('the desk works out what was meant while it is still being said', () => {
+  // Speculation is only safe because /api/intent answers a question rather
+  // than running anything, and because a guess about the wrong words is
+  // discarded rather than run.
+  assert.match(panel, /function speculate\(\)/);
+  assert.match(panel, /settle = setTimeout\(speculate, SETTLE_MS\)/);
+  assert.match(panel, /early && sameWords\(early\.key, said\) \? early\.answer : askIntent\(said\)/);
+
+  // Bounded: a guess costs a request, and one of them can be a model call.
+  assert.match(panel, /guesses >= MAX_GUESSES/);
+
+  // A new utterance starts with no inherited guess, and the pending timer
+  // cannot fire into the next one.
+  const wrapped = panel.slice(panel.indexOf('function Wrapped()'));
+  assert.match(wrapped, /clearTimeout\(settle\);\s*\n\s*guess = null;/);
+});
+
 test('the desk stops talking when the operator starts', () => {
   // Barge-in: both the mic opening and speech actually starting cancel what is
   // queued, and both void the brief still in flight so it cannot arrive later.

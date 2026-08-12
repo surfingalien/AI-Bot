@@ -84,6 +84,75 @@ test('everyday phrasings resolve locally, with no model round trip', async () =>
   assert.equal(asked.length, before, 'the fast path costs no model latency');
 });
 
+test('the rest of the vocabulary resolves locally too', async () => {
+  // Earnings, valuation and backtests had no local pattern at all, so every one
+  // of them paid a model round trip before the desk started working — on the
+  // path where the operator is standing there waiting for it to.
+  const before = asked.length;
+
+  for (const [said, expected] of [
+    ['nvidia earnings', 'earnings decode NVDA'],
+    ["apple's earnings", 'earnings decode AAPL'],
+    ['how did meta do last quarter', 'earnings decode META'],
+    ['tesla quarterly results', 'earnings decode TSLA'],
+    ["what's nvidia worth", 'DCF value NVDA'],
+    ['fair value of meta', 'DCF value META'],
+    ['dcf on nvidia', 'DCF value NVDA'],
+    ['backtest nvidia', 'backtest NVDA momentum strategy'],
+    ['test momentum on apple', 'backtest AAPL momentum strategy'],
+    ['how am I doing', 'positions'],
+    ['what am I holding', 'positions'],
+    ['update me', 'audio brief'],
+    ['run the scan', 'scan watchlist'],
+  ]) {
+    const res = await resolveIntent(said);
+    assert.equal(res.command, expected, said);
+    assert.equal(res.source, 'fast-path', said);
+  }
+
+  assert.equal(asked.length, before, 'none of these are worth a round trip');
+});
+
+test('a subject that is really a pronoun is left to the model', async () => {
+  // "tell me about it" matches the dossier shape exactly, and IT is a listed
+  // symbol. Running it would answer a question nobody asked, confidently.
+  modelReply = 'PASS';
+
+  for (const said of ['tell me about it', 'what is it worth', 'value the position']) {
+    const res = await resolveIntent(said);
+    assert.equal(res.command, said, said);
+    assert.notEqual(res.source, 'fast-path', said);
+  }
+
+  // Said as a symbol rather than a word, it is a symbol again.
+  const explicit = await resolveIntent('what is $IT worth');
+  assert.equal(explicit.command, 'DCF value IT');
+  assert.equal(explicit.source, 'fast-path');
+});
+
+test('a spoken subject is resolved rather than passed through as a symbol', async () => {
+  // "backtest nvidia" reads like a command and is not one: the desk wants a
+  // symbol. Treating it as already-valid sent "nvidia" downstream as a ticker.
+  const res = await resolveIntent('backtest nvidia');
+  assert.equal(res.command, 'backtest NVDA momentum strategy');
+  assert.equal(res.rewritten, true);
+
+  // The real command form still passes through untouched.
+  for (const command of ['backtest NVDA momentum strategy', 'earnings decode NVDA', 'DCF value NVDA']) {
+    const kept = await resolveIntent(command);
+    assert.equal(kept.command, command, command);
+    assert.equal(kept.rewritten, false, command);
+  }
+});
+
+test('a research question keeps its subject rather than becoming an earnings decode', async () => {
+  // The earnings shape matches inside this, and matching it first would throw
+  // away the part that made it a research question.
+  const res = await resolveIntent("research nvidia's earnings quality");
+  assert.equal(res.command, "deep research nvidia's earnings quality");
+  assert.equal(res.source, 'fast-path');
+});
+
 test('a phrase that is already a valid command keeps its own wording', async () => {
   // "remember that X" is a working command; normalising it would be churn, and
   // leaving valid commands alone is the conservative default.

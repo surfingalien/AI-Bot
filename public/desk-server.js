@@ -286,6 +286,46 @@
    * transcript on the way through, and hand it back in the shape its handler
    * already expects. It hears a command; the operator spoke English.
    */
+
+  // How long the interim transcript has to stop changing before it is worth
+  // asking about, and how many times per utterance that may happen. Both exist
+  // to stop a guess costing more than it saves: every speculation is a request
+  // that may go unused, and behind it may be a model call.
+  var SETTLE_MS = 400;
+  var MAX_GUESSES = 2;
+
+  // Two transcripts of the same words. A recogniser commits capitalisation and
+  // a final full stop only when it finalises, so comparing raw text would call
+  // almost every correct guess a miss.
+  function sameWords(a, b) {
+    return normalize(a) === normalize(b);
+  }
+
+  function normalize(text) {
+    return String(text || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .replace(/[.?!,]+$/, '');
+  }
+
+  // Never rejects: a translation that failed is the same as one that was never
+  // possible, and both mean running what the operator actually said.
+  function askIntent(transcript) {
+    return api('/api/intent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transcript: transcript }),
+    }).then(
+      function (res) {
+        return res.json && res.json.ok ? res.json : null;
+      },
+      function () {
+        return null;
+      },
+    );
+  }
+
   function installIntent() {
     var Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Ctor || window.__saIntentPatched) return;
@@ -296,6 +336,10 @@
       var deskResult = null;
       var deskEnd = null;
       var heard = '';
+      var interim = '';
+      var guess = null; // { key, answer } — what the desk asked about early
+      var guesses = 0;
+      var settle = null;
 
       // Barge-in. The moment the operator starts talking, whatever the desk is
       // saying is an answer to the previous question — and worse, it is going
@@ -315,12 +359,47 @@
       rec.addEventListener('start', bargeIn);
       rec.addEventListener('speechstart', bargeIn);
 
+      // A new utterance. Anything guessed about the last one was about words
+      // that have already been answered.
+      rec.addEventListener('start', function () {
+        clearTimeout(settle);
+        guess = null;
+        guesses = 0;
+        interim = '';
+      });
+
+      // Ask what the interim transcript means while the operator is still
+      // talking. Translation is the one part of the round trip that can happen
+      // before they stop — by the time they do, the answer is already here, and
+      // the desk starts working instead of starting to ask.
+      //
+      // Only ever a question: /api/intent reads, it does not run anything, so a
+      // guess about words nobody finished saying costs a request and nothing
+      // else.
+      function speculate() {
+        if (!serverReady || !intentMode || guesses >= MAX_GUESSES) return;
+        var text = (heard + interim).trim();
+        // One word is either already a command or too little to place, and both
+        // are answered without a model.
+        if (!text || text.split(/\s+/).length < 2) return;
+        var key = normalize(text);
+        if (!key || (guess && guess.key === key)) return;
+        guesses++;
+        guess = { key: key, answer: askIntent(text) };
+      }
+
       rec.addEventListener('result', function (e) {
         // Track the final transcript ourselves; the desk's copy is rebuilt
         // from the event we synthesise later.
+        interim = '';
         for (var i = e.resultIndex; i < e.results.length; i++) {
           if (e.results[i].isFinal) heard += e.results[i][0].transcript;
+          else interim += e.results[i][0].transcript;
         }
+        // Mid-word the transcript changes constantly and every guess would be
+        // about a fragment. A pause is what makes it worth asking.
+        clearTimeout(settle);
+        settle = setTimeout(speculate, SETTLE_MS);
       });
 
       Object.defineProperty(rec, 'onresult', {
@@ -346,8 +425,14 @@
         set: function (fn) {
           deskEnd = fn;
           rec.addEventListener('end', function () {
+            clearTimeout(settle);
             var said = heard.trim();
+            var early = guess;
             heard = '';
+            interim = '';
+            guess = null;
+            guesses = 0;
+
             if (!serverReady || !intentMode || !said) {
               if (deskEnd) deskEnd();
               return;
@@ -355,18 +440,20 @@
             var brief = document.getElementById('brief');
             if (brief) brief.textContent = 'understanding…';
 
-            api('/api/intent', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ transcript: said }),
-            })
-              .then(function (res) {
-                var out = res.json && res.json.ok ? res.json : null;
-                deliver(out && out.command ? out.command : said, said, out);
-              })
-              .catch(function () {
-                deliver(said, said, null);
-              });
+            // The early answer stands in only when it was asked about these
+            // words. When it was not — the operator kept talking, or changed
+            // what they were saying — it is dropped and the question is asked
+            // properly, which is exactly what used to happen every time.
+            var answer = early && sameWords(early.key, said) ? early.answer : askIntent(said);
+
+            answer.then(function (out) {
+              // An untranslated command is just the words back. Those should be
+              // the words as finally heard, not the interim echo a guess was
+              // asked about — the recogniser tidies capitalisation on the way
+              // out, and a remembered fact should keep the tidy version.
+              var rewritten = out && out.command && out.rewritten;
+              deliver(rewritten ? out.command : said, said, out);
+            });
           });
         },
       });

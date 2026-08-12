@@ -254,6 +254,7 @@ export async function* briefStream(text, options = {}) {
       temperature: 0.4,
       maxTokens: style === 'alert' ? 80 : 160,
       signal: controller.signal,
+      timeoutMs: config.voice.brainTimeoutMs,
     })) {
       buffer += delta;
 
@@ -307,6 +308,10 @@ async function modelBrief(input, title, style) {
   const raw = await complete(briefMessages(input, title, style), {
     temperature: 0.4,
     maxTokens: style === 'alert' ? 80 : 160,
+    // `briefFor` stops waiting at its own deadline but lets the call finish so
+    // the answer lands in the cache. Without a bound of its own that orphaned
+    // call could outlive every reason anyone had for making it.
+    timeoutMs: config.voice.brainTimeoutMs,
   });
 
   // A model that ignores the brief and answers in markdown would defeat it.
