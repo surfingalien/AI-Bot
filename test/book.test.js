@@ -63,24 +63,37 @@ test('the refusal carries everything needed to dial by hand', async () => {
   assert.match(fallback.script, /Suhas/);
 });
 
-test('a malformed request is a 400 whether or not Twilio is wired up', async () => {
-  const noVenue = await post({ phone: '+13232970100' });
-  assert.equal(noVenue.status, 400);
-  assert.match((await noVenue.json()).error, /venue/);
+test('an incomplete booking asks one question instead of listing fields', async () => {
+  // "missing: venue, phone" tells a developer what happened and the person at
+  // the desk nothing. Each gap carries the question to actually ask.
+  const noVenue = await post({ phone: '+13232970100', partySize: 2, when: 'Friday 7pm' });
+  assert.equal(noVenue.status, 422);
+  const first = await noVenue.json();
+  assert.deepEqual(first.needs, ['venue']);
+  assert.match(first.question, /which restaurant/i);
 
-  const noPhone = await post({ venue: 'Somewhere' });
-  assert.equal(noPhone.status, 400);
-  assert.match((await noPhone.json()).error, /phone/);
+  // Several gaps still produce one question — the first one a person would ask.
+  const bare = await post({ venue: 'Nobu' });
+  const second = await bare.json();
+  assert.deepEqual(second.needs, ['phone', 'partySize', 'when']);
+  assert.match(second.question, /number/i, 'asks for the phone, not all three at once');
+  assert.equal(second.booking.venue, 'Nobu', 'echoes what is already known');
+});
+
+test('an unusable phone stays a 400 — no question fixes it', async () => {
+  const res = await post({ venue: 'Nobu', phone: '555-CALL', partySize: 2, when: 'Friday' });
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /unusable phone/);
 });
 
 test('a phone number scraped off a page is rejected here, not by Twilio', async () => {
   for (const phone of ['call us!', '555-CALL', '12', '+1 (323) 297 0100 ext 4']) {
-    const res = await post({ venue: 'X', phone });
+    const res = await post({ venue: 'X', phone, partySize: 2, when: 'Friday' });
     assert.equal(res.status, 400, `${phone} should be refused`);
     assert.match((await res.json()).error, /unusable phone/);
   }
   // Human separators are fine; what is left has to be digits.
-  const ok = await post({ venue: 'X', phone: '(323) 297-0100' });
+  const ok = await post({ venue: 'X', phone: '(323) 297-0100', partySize: 2, when: 'Friday' });
   assert.equal(ok.status, 501, 'a usable number gets past validation');
 });
 
@@ -90,7 +103,7 @@ test('a body sent without Content-Type is still parsed', async () => {
   // answered "missing: venue, phone" — a complaint about the wrong problem.
   const res = await fetch(`${base}/api/book`, {
     method: 'POST',
-    body: JSON.stringify({ restaurant: 'Nobu', phone: '+13232970100', party: 2 }),
+    body: JSON.stringify({ restaurant: 'Nobu', phone: '+13232970100', party: 2, when: 'Friday 7pm' }),
   });
   assert.equal(res.status, 501, 'the fields were read, so the refusal is about Twilio');
   assert.equal((await res.json()).fallback.venue, 'Nobu');
@@ -104,7 +117,9 @@ test('`name` is the guest when a venue is named, and the venue when it is not', 
   assert.equal(withVenue.fallback.onBehalfOf, 'Tony');
   assert.match(withVenue.fallback.script, /under the name Tony/);
 
-  const alone = await (await post({ name: 'Bestia', phone: '+13232970100' })).json();
+  const alone = await (
+    await post({ name: 'Bestia', phone: '+13232970100', party: 2, when: 'Friday 7pm' })
+  ).json();
   assert.equal(alone.fallback.venue, 'Bestia', 'with nothing else, name is the venue');
   assert.equal(alone.fallback.onBehalfOf, '');
 });

@@ -98,9 +98,11 @@
   register({
     name: 'book_restaurant',
     desc:
-      'BOOK A TABLE by having the server phone the venue. Provide venue and phone; ' +
-      'partySize, when, onBehalfOf and notes are optional. If the server cannot place ' +
-      'calls it returns a script to read out, which you should show the user verbatim.',
+      'BOOK A TABLE by having the server phone the venue. Needs venue, phone, partySize and when. ' +
+      'If any are missing the server replies with the single next question to ask — ask the user ' +
+      'that one question, do not invent the answer. When everything is known the server reads the ' +
+      'booking back for approval; call again with confirm=true only after the user agrees. If the ' +
+      'server cannot place calls it returns a script to read out, which you should show verbatim.',
     p: {
       venue: 'string',
       phone: 'string',
@@ -108,6 +110,7 @@
       when: 'string',
       onBehalfOf: 'string',
       notes: 'string',
+      confirm: 'boolean',
     },
     exec: function (a, ctx) {
       if (!S.dataBase) return 'booking needs the DATA PROXY';
@@ -118,6 +121,7 @@
         when: String(a.when || ''),
         onBehalfOf: String(a.onBehalfOf || ''),
         notes: String(a.notes || ''),
+        confirm: a.confirm === true,
       };
 
       return proxy('/api/book', {
@@ -132,6 +136,37 @@
           if (res.status === 400) {
             ctx.actions.push({ t: 'stat', label: 'booking incomplete' });
             return '**I need more before I can call.** ' + (j.error || 'the booking is incomplete') + '.';
+          }
+
+          // Incomplete, not wrong. The server names the one thing to ask for
+          // next, so the desk asks that instead of listing every empty field —
+          // a person collecting a booking asks one question at a time.
+          if (res.status === 422) {
+            // The chip carries the question itself, not the field names behind
+            // it. `still need: partySize, when` is the same developer-speak the
+            // server stopped emitting, and it is the one line guaranteed to
+            // reach the screen — the tool's return value only gets there if the
+            // model chooses to relay it.
+            ctx.actions.push({ t: 'stat', label: j.question || 'more detail needed' });
+            return j.question || 'What else should I know before I call?';
+          }
+
+          // Complete and dialable, so nothing happens until the operator says
+          // so. Returned as a question rather than performed as an action.
+          if (res.status === 200 && j.stage === 'confirm') {
+            ctx.actions.push({ t: 'stat', label: 'waiting on confirmation' });
+            var b = j.booking || booking;
+            return [
+              '**Ready to call ' + b.venue + '.**',
+              '',
+              '- ' + (b.phone || 'no number'),
+              '- ' + (b.partySize ? b.partySize + ' people' : 'party size unknown') + ', ' + (b.when || 'time unknown'),
+              b.onBehalfOf ? '- under ' + b.onBehalfOf : '',
+              '',
+              'Say **confirm** and I will place the call.',
+            ]
+              .filter(Boolean)
+              .join('\n');
           }
 
           // The server has no voice line. This is the path that matters: say so
@@ -246,4 +281,147 @@
         });
     },
   });
+
+  // ---------------------------------------------------------------------
+  // Saying something true immediately
+  // ---------------------------------------------------------------------
+  //
+  // A spinner appears because the interface has nothing true to say yet. The
+  // fix is not a nicer spinner — it is to arrange for something true to be
+  // available at submit, which means saying only what is already known from the
+  // utterance itself. No network call, no model, no I/O of any kind: that is
+  // precisely why it can appear instantly, and why it can never be wrong about
+  // something it had to go and find out.
+  //
+  // It is a placeholder, not an answer. The first streamed token replaces it.
+
+  function acknowledge(utterance) {
+    var t = String(utterance == null ? '' : utterance).trim();
+    if (!t) return 'One moment.';
+
+    var url = t.match(/https?:\/\/([^/\s]+)/i);
+    if (url) return 'Reading ' + url[1].replace(/^www\./i, '') + '…';
+
+    if (/\bbook\b|\btable\b|\breservation\b|\bdinner\b/i.test(t)) return 'Getting the booking together…';
+    if (/\bdeep[-\s]?research\b|\bresearch\b|\blook (this|that|it) up\b/i.test(t)) return 'Looking that up…';
+    if (/\bportfolio\b|\bpositions\b|\bholdings\b/i.test(t)) return 'Pricing your positions…';
+    if (/\bscorecard\b|\bprediction/i.test(t)) return 'Scoring the record…';
+    if (/\bbacktest\b/i.test(t)) return 'Running the backtest…';
+    if (/\bremember\b|\bnote that\b/i.test(t)) return 'Writing that down…';
+    if (/\bbuild\b.*\bapp\b|\bcreate_prompt\b|\bbuild_app\b/i.test(t)) return 'Building that…';
+
+    // A bare ticker is the most common thing typed here, and naming it back is
+    // the most reassuring thing to say. Common English words in caps are not
+    // tickers, so they fall through rather than producing "Pulling THE…".
+    var sym = t.match(/\b[A-Z]{2,5}\b/);
+    if (sym && !/^(THE|AND|FOR|YOU|ARE|WAS|BUT|NOT|CAN|HOW|WHY|WHO|ALL|ANY|NEW|NOW|OUT|GET|LET|SEE|USE|ITS|OUR)$/.test(sym[0])) {
+      return 'Pulling ' + sym[0] + '…';
+    }
+
+    if (/\?\s*$/.test(t)) return 'Thinking about that…';
+    return 'On it…';
+  }
+
+  // Every turn opens through here, so this is the one place that covers typed
+  // input, spoken input, tapped suggestions and dossiers alike. Reassigning the
+  // engine's own binding works because this file is spliced into its scope —
+  // from outside, the function is unreachable.
+  if (typeof openLiveTurn === 'function') {
+    var openLiveTurnBase = openLiveTurn;
+    // eslint-disable-next-line no-func-assign
+    openLiveTurn = function (turn) {
+      var live = openLiveTurnBase(turn);
+      try {
+        live.setBody(acknowledge(turn && turn.user));
+      } catch (e) {
+        /* an acknowledgement is never worth breaking a turn over */
+      }
+      return live;
+    };
+  }
+
+  // ---------------------------------------------------------------------
+  // Waking up
+  // ---------------------------------------------------------------------
+  //
+  // The desk greets on boot from what the browser knows, which is nothing about
+  // what happened while the tab was closed — and that is the only interesting
+  // thing to say on waking. This asks the server what it has been doing and
+  // reports it, so the greeting carries information rather than atmosphere.
+
+  function plural(n, one, many) {
+    return n + ' ' + (n === 1 ? one : many);
+  }
+
+  function wakeLine(state, activity) {
+    var goals = (state && state.goals) || [];
+    var armed = goals.filter(function (g) {
+      return g.enabled;
+    }).length;
+
+    var hour = new Date().getHours();
+    var parts = [(hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening') + ', ' + S.name + '.'];
+
+    parts.push(armed ? plural(armed, 'goal', 'goals') + ' armed.' : 'No goals armed.');
+
+    // Only what happened since the tab was last open is news.
+    var since = Date.now() - 12 * 3600 * 1000;
+    var recent = ((activity && activity.activity) || []).filter(function (a) {
+      return a && a.t > since;
+    });
+    if (recent.length) {
+      var last = recent[0];
+      parts.push(plural(recent.length, 'thing', 'things') + ' fired in the last twelve hours,');
+      parts.push('most recently ' + String(last.label || last.text || 'a goal').replace(/\s+/g, ' ').slice(0, 70) + '.');
+    } else if (armed) {
+      parts.push('Nothing fired while you were away.');
+    }
+
+    return parts.join(' ');
+  }
+
+  function wake() {
+    if (!S.dataBase) return;
+    Promise.all([
+      proxy('/api/autonomy').then(readJson),
+      proxy('/api/autonomy/activity?limit=20').then(readJson),
+    ])
+      .then(function (both) {
+        if (both[0].status !== 200) return;
+        var line = wakeLine(both[0].body, both[1].body);
+        pushTurn({
+          user: '(waking up)',
+          agentId: 'chief',
+          agentName: 'Chief of staff',
+          color: 'cyan',
+          md: line,
+          text: line,
+          pre: null,
+          actions: [],
+          t: Date.now(),
+        });
+        speak(line);
+      })
+      .catch(function () {
+        /* a greeting is not worth an error card */
+      });
+  }
+
+  // Fires on entering the desk rather than at load, so it lands after the HUD
+  // is visible and never speaks to an empty room.
+  var enterBase = window.__saEnter;
+  window.__saEnter = function () {
+    if (typeof enterBase === 'function') {
+      try {
+        enterBase();
+      } catch (e) {
+        /* the desk's own entry must not be blocked by ours */
+      }
+    }
+    setTimeout(wake, 700);
+  };
+
+  // A test seam. These are pure functions with no side effects; exposing them
+  // is what lets them be asserted directly rather than through the DOM.
+  window.__saExt = { acknowledge: acknowledge, wakeLine: wakeLine };
 })();
