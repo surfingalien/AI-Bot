@@ -4,6 +4,7 @@ import {
   extractVerdict,
   humanizeMagnitude,
   humanizeNumbers,
+  looksLikeRepeat,
   needsRewrite,
   speakNumber,
   stripMarkup,
@@ -134,4 +135,29 @@ test('needsRewrite spares text that is already speech', () => {
   assert.equal(needsRewrite('Price 142.6234 today'), true, 'long decimals');
   assert.equal(needsRewrite('1 2 3 4 5 figures here'), true, 'number soup');
   assert.equal(needsRewrite('x'.repeat(300)), true, 'long passages');
+});
+
+test('a restatement is recognised however it is worded', () => {
+  // The spoken lead and the written brief are produced independently — the
+  // lead is the answer's own opening, the brief a summary written afterwards —
+  // so a repeat has to be recognised by what it says, not by matching text.
+  const lead = 'Nvidia still screens as a buy, with momentum intact.';
+
+  assert.equal(looksLikeRepeat('Nvidia still screens as a buy with momentum intact.', lead), true);
+  assert.equal(looksLikeRepeat('Nvidia remains a buy; momentum is intact.', lead), true, 'reworded');
+
+  // And a brief that opens with something else keeps it: the listener gets no
+  // second chance at a sentence nobody said.
+  assert.equal(looksLikeRepeat('Earnings land on Thursday after the close.', lead), false);
+  assert.equal(looksLikeRepeat('Valuation is the caveat worth watching.', lead), false);
+});
+
+test('shared filler is not mistaken for shared meaning', () => {
+  // Two unrelated sentences share "the", "is", "that". Counting those would
+  // silently drop briefs that had nothing to do with the lead.
+  assert.equal(
+    looksLikeRepeat('The position is the one that has been there.', 'The risk is that this has been the case.'),
+    false,
+  );
+  assert.equal(looksLikeRepeat('Buy.', 'Buy.'), false, 'too short to judge either way');
 });

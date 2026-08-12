@@ -145,6 +145,51 @@ export function splitSentences(text) {
     .filter(Boolean);
 }
 
+/** The words that carry meaning, for comparing two sentences by what they say. */
+function contentWords(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+}
+
+// Common enough that two unrelated sentences will share them, so they say
+// nothing about whether one restates the other.
+const STOP_WORDS = new Set([
+  'the', 'and', 'but', 'for', 'with', 'that', 'this', 'from', 'has', 'have', 'had', 'was', 'were',
+  'are', 'its', 'it', 'about', 'into', 'than', 'then', 'they', 'there', 'here', 'which', 'while',
+  'still', 'also', 'been', 'being', 'over', 'under', 'more', 'most', 'less', 'some', 'any', 'all',
+]);
+
+/**
+ * Whether one sentence restates another.
+ *
+ * This exists because a spoken lead and a written brief are produced
+ * independently: the lead is the answer's own opening sentence, said as soon as
+ * it exists, and the brief is a model's summary of the same answer written
+ * afterwards. Usually the brief opens by making the same point, and saying it
+ * twice is worse than either. Occasionally it opens with something else, and
+ * dropping that would lose information the listener never gets another chance
+ * at — so this has to be a judgement rather than an assumption.
+ *
+ * Overlap is measured against the shorter sentence: a brief opener that adds a
+ * clause to the lead is still a repeat of it.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+export function looksLikeRepeat(a, b) {
+  const one = contentWords(a);
+  const two = contentWords(b);
+  if (one.length < 3 || two.length < 3) return false;
+
+  const seen = new Set(two);
+  const shared = one.filter((w) => seen.has(w)).length;
+  return shared / Math.min(one.length, two.length) >= 0.6;
+}
+
 /** A verdict line is the one thing worth leading with when present. */
 export function extractVerdict(text) {
   const m = String(text || '').match(

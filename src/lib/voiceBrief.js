@@ -13,6 +13,7 @@ import {
   MAX_SENTENCES,
   extractVerdict,
   humanizeNumbers,
+  looksLikeRepeat,
   needsRewrite,
   splitSentences,
   stripMarkup,
@@ -151,6 +152,13 @@ function afterLead(script) {
   return parts.length > 1 ? parts.slice(1).join(' ') : '';
 }
 
+/** The same, but only where the opening sentence really does repeat the lead. */
+function withoutRepeatOfLead(script, spokenLead) {
+  const parts = splitSentences(script);
+  if (!parts.length || !looksLikeRepeat(parts[0], spokenLead)) return script;
+  return parts.slice(1).join(' ');
+}
+
 /**
  * The same brief, sentence by sentence, for callers that can start speaking
  * before the model has finished writing.
@@ -164,8 +172,14 @@ function afterLead(script) {
  * The ordering guarantee is what keeps the consumer trivial: a `fallback` only
  * ever arrives when no `sentence` has, so nothing can be said twice.
  *
+ * `spokenLead` is a sentence the caller has already said out loud — the
+ * answer's own opening, spoken the moment it existed rather than waiting for
+ * the brief. It is not repeated here, and where the model opens by making the
+ * same point that opener is dropped. Where it opens with something else, it is
+ * kept: the listener gets no second chance at a sentence nobody said.
+ *
  * @param {string} text
- * @param {{title?:string, style?:'brief'|'alert', skipPassthrough?:boolean, signal?:AbortSignal}} [options]
+ * @param {{title?:string, style?:'brief'|'alert', skipPassthrough?:boolean, signal?:AbortSignal, spokenLead?:string}} [options]
  */
 export async function* briefStream(text, options = {}) {
   const input = String(text || '').trim();
@@ -173,16 +187,23 @@ export async function* briefStream(text, options = {}) {
 
   const style = options.style === 'alert' ? 'alert' : 'brief';
   const title = options.title || '';
+  const spokenLead = style === 'brief' ? String(options.spokenLead || '').trim() : '';
 
   // Already speech: a reminder, or the desk's own one-liner. There is nothing
-  // to stream and nothing to wait for.
+  // to stream and nothing to wait for — but the caller may have said its
+  // opening sentence already, and this path hands back the whole input, which
+  // would say that sentence a second time.
   if (!options.skipPassthrough && !needsRewrite(input)) {
-    yield { type: 'fallback', script: input, source: 'passthrough' };
+    const script = spokenLead ? withoutRepeatOfLead(input, spokenLead) : input;
+    if (script) yield { type: 'fallback', script, source: 'passthrough' };
     yield { type: 'done', source: 'passthrough' };
     return;
   }
 
-  const key = cacheKey(input, style);
+  // A brief written to follow a spoken lead is a different script from one
+  // written to stand alone — it is missing the opener on purpose — so the two
+  // must not share a cache entry.
+  const key = cacheKey(input, spokenLead ? `${style}:led` : style);
   const hit = cache.get(key);
   if (hit && Date.now() - hit.ts <= CACHE_TTL_MS) {
     yield { type: 'fallback', script: hit.script, source: hit.source, cached: true };
@@ -220,8 +241,13 @@ export async function* briefStream(text, options = {}) {
   }
 
   const spoken = [];
-  let said = lead ? 1 : 0;
+  // Anything already said counts against the ceiling, whether this generator
+  // said it or the caller did.
+  let said = lead || spokenLead ? 1 : 0;
   let dropLead = Boolean(lead); // the model's opener duplicates one we just gave
+  // The caller's lead was not written to this prompt, so whether the model
+  // repeats it has to be checked rather than assumed.
+  let checkRepeat = Boolean(spokenLead) && !lead;
   let buffer = '';
   let timedOut = false;
 
@@ -242,6 +268,10 @@ export async function* briefStream(text, options = {}) {
     if (dropLead) {
       dropLead = false;
       return null;
+    }
+    if (checkRepeat) {
+      checkRepeat = false;
+      if (looksLikeRepeat(shaped, spokenLead)) return null;
     }
     if (said >= MAX_SENTENCES) return null;
     said += 1;
@@ -289,7 +319,10 @@ export async function* briefStream(text, options = {}) {
       // Nothing of the model's has been said, so the rules script can still
       // stand in whole — minus the lead, if that already went out.
       log.debug(`voice brief stream fell back to rules: ${timedOut ? 'deadline' : err?.message || err}`);
-      const rest = lead ? afterLead(fallback) : fallback;
+      let rest = lead ? afterLead(fallback) : fallback;
+      // The rules script is built from the same source the caller read its lead
+      // out of, so its opening sentence is very often that same sentence.
+      if (!lead && spokenLead) rest = withoutRepeatOfLead(rest, spokenLead);
       if (rest) yield { type: 'fallback', script: rest, source };
       yield { type: 'done', source };
       return;

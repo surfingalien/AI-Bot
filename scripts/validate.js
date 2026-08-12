@@ -84,6 +84,23 @@ function handle(req, res, raw) {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
     const sse = (o) => res.write(`data: ${JSON.stringify(o)}\n\n`);
 
+    // Two sentences with a real gap between them. A client that speaks the
+    // answer's opening the moment it is whole can be seen doing so, because the
+    // second sentence does not exist yet when it does.
+    // Keyed on the whole question rather than a word in it: "momentum" alone
+    // also appears in the written analysis a spoken brief is asked to rewrite,
+    // and answering that with this would change what every other voice check is
+    // measuring.
+    if (/read on momentum right now/i.test(asked) && !toolAlreadyRan) {
+      sse({ choices: [{ delta: { content: 'Momentum is constructive across the group today. ' } }] });
+      setTimeout(() => {
+        sse({ choices: [{ delta: { content: 'Valuation is the caveat.' } }] });
+        res.write('data: [DONE]\n\n');
+        res.end();
+      }, 700);
+      return undefined;
+    }
+
     if (/\bbook\b/i.test(asked) && !toolAlreadyRan) {
       sse({
         choices: [

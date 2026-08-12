@@ -94,7 +94,15 @@ page.on('request', (r) => {
 // is being checked is what the desk *asked* to have spoken.
 await page.addInitScript(() => {
   window.__spoken = [];
+  window.__spokenAt = [];
   window.__recs = [];
+  // The desk keeps speech off by default, and half of what is checked below is
+  // what it says out loud.
+  try {
+    localStorage.setItem('sa_speak', 'true');
+  } catch (e) {
+    /* first navigation, no origin yet — the next one sets it */
+  }
   class FakeRecognition {
     constructor() {
       window.__recs.push(this);
@@ -131,6 +139,7 @@ await page.addInitScript(() => {
       const real = window.speechSynthesis.speak.bind(window.speechSynthesis);
       window.speechSynthesis.speak = (u) => {
         window.__spoken.push(u && u.text);
+        window.__spokenAt.push(performance.now());
         return real(u);
       };
       clearInterval(wait);
@@ -160,10 +169,28 @@ check('the engine boots', await page.evaluate(() => Boolean(window.__saInit)));
 check('no fatal banner', (await page.locator('#fatal.show').count()) === 0);
 check('the SERVER launcher mounts', (await page.locator('.sasrv-btn').count()) === 1);
 
+console.log('\n  one menu, two panels');
+await page.locator('.sasrv-btn').click();
+await page.waitForTimeout(400);
+check('the launcher opens a menu, not a panel', (await page.locator('.sasrv-menu.on').count()) === 1);
+check('offering both panels', (await page.locator('.sasrv-mitem').count()) === 2);
+
+// MISSION CONTROL is the desk's own drawer, reached by its class because the
+// function that opens it is closure-scoped inside the engine.
+await page.locator('.sasrv-mitem', { hasText: 'MISSION CONTROL' }).click();
+await page.waitForTimeout(600);
+check('mission control opens from it', (await page.locator('#drawer.open').count()) === 1);
+check('and the menu closes behind it', (await page.locator('.sasrv-menu.on').count()) === 0);
+
 console.log('\n  the panel');
 await page.locator('.sasrv-btn').click();
+await page.waitForTimeout(300);
+await page.locator('.sasrv-mitem', { hasText: 'SERVER' }).click();
 await page.waitForTimeout(900);
 check('it opens', (await page.locator('.sasrv-panel.on').count()) === 1);
+// It layers over mission control rather than closing it: that drawer holds the
+// composer and the log, so closing it to make room would take the input away.
+check('leaving the desk intact underneath', (await page.locator('#drawer.open').count()) === 1);
 const status = (await page.locator('.sasrv-stat').first().innerText()).replace(/\n/g, ' ');
 check('status reads live', /RUNNING/.test(status), status.slice(0, 90));
 
@@ -231,7 +258,10 @@ console.log('\n  booking, end to end');
 // The panel is still open from the checks above and covers the composer.
 await page.locator('.sasrv-head .sasrv-x').click();
 await page.waitForTimeout(500);
+// Dismissing it gives the desk back rather than leaving a blank screen — the
+// drawer underneath is where the composer lives.
 const composer = page.locator('#dinput');
+check('dismissing the panel gives the composer back', await composer.isVisible());
 await composer.click();
 await composer.fill('book a table for 4 at Osteria Mozza on Friday at 8pm under Suhas');
 await page.keyboard.press('Enter');
@@ -320,6 +350,107 @@ check(
   /data center/i.test(corrected),
   corrected.slice(0, 70),
 );
+
+console.log('\n  speaking before the answer is finished');
+// The desk used to hand the finished answer to speech and only then send it
+// away to be rewritten, so the first spoken word waited on two model calls end
+// to end. Timed rather than merely present: a check on what was said would pass
+// just as well against the implementation that says it at the end.
+await page.evaluate(() => {
+  window.__spoken = [];
+  window.__spokenAt = [];
+});
+await composer.click();
+await composer.fill('give me your read on momentum right now please');
+await page.keyboard.press('Enter');
+
+// Waited for rather than sampled: the desk does its own work before the answer
+// starts arriving, and how long that takes is not what is being measured. What
+// is being measured is the distance between the first spoken word and the last.
+await page
+  .waitForFunction(() => window.__spoken.length >= 2, null, { timeout: 25000 })
+  .catch(() => {});
+const all = await page.evaluate(() => ({ spoken: window.__spoken.slice(), at: window.__spokenAt.slice() }));
+
+check(
+  'the answer’s own opening is spoken first, as its own utterance',
+  /^Momentum is constructive across the group today\.$/.test(all.spoken[0] || ''),
+  (all.spoken[0] || '(nothing spoken)').slice(0, 60),
+);
+// The stub holds its second sentence back by 700ms, so a gap anywhere near
+// that is proof the first was spoken while the rest was still being written.
+// Against the implementation that waited for the finished answer this was 20ms.
+check(
+  'while the rest of it is still being written',
+  all.spoken.length >= 2 && all.at[1] - all.at[0] > 300,
+  `${all.spoken.length} utterances, ${Math.round((all.at[1] || 0) - (all.at[0] || 0))}ms apart`,
+);
+// Saying it twice is worse than either, and the guard lives on the server: the
+// brief is told what was already said and drops its opener when it repeats it.
+const repeats = all.spoken.filter((s) => /Momentum is constructive across the group/.test(s || '')).length;
+check('and nothing is said twice', repeats === 1, `${repeats} utterance(s) carried the lead`);
+
+console.log('\n  installable');
+const manifest = await page.evaluate(async () => {
+  const link = document.querySelector('link[rel="manifest"]');
+  if (!link) return null;
+  const res = await fetch(link.href);
+  return { status: res.status, body: await res.json() };
+});
+check('a manifest is served', manifest && manifest.status === 200, manifest ? manifest.body.name : 'missing');
+check(
+  'it asks for standalone, with icons',
+  manifest && manifest.body.display === 'standalone' && manifest.body.icons.length >= 2,
+  manifest ? `${manifest.body.display}, ${manifest.body.icons.length} icons` : '',
+);
+const icon = await page.evaluate(async () => {
+  const res = await fetch('/icon-192.png');
+  const buf = new Uint8Array(await res.arrayBuffer());
+  return { status: res.status, type: res.headers.get('content-type'), png: buf[1] === 0x50 && buf[2] === 0x4e, bytes: buf.length };
+});
+check('the icon is a real PNG', icon.status === 200 && icon.png, `${icon.type}, ${icon.bytes} bytes`);
+const sw = await page.evaluate(async () => {
+  const res = await fetch('/sw.js');
+  const body = await res.text();
+  return { status: res.status, cachesApi: body.includes("indexOf('/api/') === 0") };
+});
+check('a service worker is served', sw.status === 200);
+// The desk is live data. A worker that cached /api would answer a dossier from
+// yesterday, which is worse than not answering at all.
+check('and it refuses to cache anything under /api', sw.cachesApi);
+
+console.log('\n  on a phone');
+// A new page is a new context, so it carries none of the cookies the desktop
+// one unlocked with — it has to unlock for itself or it measures the 401 page.
+const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+await phone.goto(`${BASE}/?token=${TOKEN}`, { waitUntil: 'networkidle' });
+const phoneEnter = phone.locator('.enterbtn');
+if (await phoneEnter.count()) await phoneEnter.first().click();
+await phone.waitForTimeout(2000);
+const fit = await phone.evaluate(() => {
+  const de = document.documentElement;
+  const drawer = document.querySelector('.drawer');
+  const tabs = document.querySelector('.tabs');
+  const launcher = document.querySelector('.sasrv-btn.sasrv-float');
+  const composer = document.querySelector('#dinput');
+  const overlap = (a, b) => {
+    if (!a || !b) return false;
+    const r = a.getBoundingClientRect();
+    const s = b.getBoundingClientRect();
+    return r.right > s.left && r.left < s.right && r.bottom > s.top && r.top < s.bottom;
+  };
+  return {
+    horizontalScroll: de.scrollWidth > de.clientWidth,
+    drawerFillsWidth: drawer ? Math.round(drawer.getBoundingClientRect().width) >= de.clientWidth - 1 : null,
+    tabsScrollable: tabs ? getComputedStyle(tabs).overflowX === 'auto' : null,
+    launcherOverlapsComposer: overlap(launcher, composer),
+  };
+});
+check('the page does not scroll sideways', fit.horizontalScroll === false);
+check('the drawer uses the whole width instead of 470px of it', fit.drawerFillsWidth === true);
+check('the tab row scrolls rather than running off the edge', fit.tabsScrollable === true);
+check('and the launcher is clear of the composer', fit.launcherOverlapsComposer === false);
+await phone.close();
 
 check('no uncaught page errors', errors.length === 0, errors.slice(0, 2).join(' | '));
 

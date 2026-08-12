@@ -341,6 +341,142 @@
   }
 
   // ---------------------------------------------------------------------
+  // Speaking while the answer is still being written
+  // ---------------------------------------------------------------------
+  //
+  // The desk streams its answer to the screen and then, once the last token has
+  // landed, hands the finished text to speech — which sends it away to be
+  // rewritten into a briefing. So the first spoken word waits for two model
+  // calls end to end, and the second one has not even started when the reader
+  // has already finished reading.
+  //
+  // The answer's own opening sentence exists long before either. Saying it the
+  // moment it is complete costs nothing and is not a summary of the answer, it
+  // is the answer's own words. The briefing still follows; the server is told
+  // what was said so it does not say it again.
+  //
+  // The guard below is the whole safety of this. A sentence is only spoken
+  // early when it is already speech — no markdown, no figure nobody would read
+  // aloud, not a preamble about what the desk is about to do. Anything else and
+  // nothing is spoken early at all, which is exactly what used to happen.
+
+  var LEAD_MIN_CHARS = 20;
+  var LEAD_MAX_CHARS = 220;
+
+  // "Let me pull that up." is not an answer, and leading with it would spend
+  // the one sentence the listener hears first on saying nothing.
+  var PREAMBLE =
+    /^(let me|let's|sure|certainly|of course|okay|ok|alright|right|here(?:'s| is| are)|i'?ll|i'?m |looking at|pulling|checking|first,|to answer)/i;
+
+  /**
+   * The first sentence of a partial answer, if it can be said as it stands.
+   *
+   * @param {string} body the answer so far, as markdown
+   * @returns {string} the sentence, or '' when nothing is safe to say yet
+   */
+  function leadSentence(body) {
+    var text = String(body || '');
+    if (!text.trim()) return '';
+
+    // Trailing whitespace is the only evidence a sentence has ended rather than
+    // being the part of one that has arrived so far — and on a live stream the
+    // first delta usually *is* "…today. ", with that space as its last
+    // character. Trimming the text before matching would throw away the very
+    // thing being looked for, and the lead would never fire until the answer
+    // was complete, which is the wait this exists to remove.
+    var m = text.match(/^\s*([\s\S]*?[.!?])\s/);
+    if (!m) return '';
+
+    var first = m[1].trim();
+    if (first.length < LEAD_MIN_CHARS || first.length > LEAD_MAX_CHARS) return '';
+    // Markdown, a table, a heading, a citation: written, not spoken. The shaper
+    // on the server exists for exactly this, and reaching it means waiting.
+    if (/[*_#`|[\]<>]/.test(first)) return '';
+    if (/\n/.test(first)) return '';
+    // "12.4531%" read aloud is a string of digits. One decimal place is speech;
+    // more is a spreadsheet.
+    if (/\d\.\d{2,}/.test(first)) return '';
+    if (PREAMBLE.test(first)) return '';
+    return first;
+  }
+
+  // What was said early, waiting for the brief that continues it.
+  var pendingLead = null;
+  var LEAD_MAX_AGE_MS = 120000;
+
+  function sameStart(text, lead) {
+    var a = String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    var b = String(lead || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    return Boolean(b) && a.indexOf(b) === 0;
+  }
+
+  function sayLead(sentence) {
+    try {
+      var u = new SpeechSynthesisUtterance(sentence);
+      // Say it as it is. It was judged speakable above; sending it away to be
+      // rewritten would reintroduce the wait this removes.
+      u.__saPlain = true;
+      window.speechSynthesis.speak(u);
+      pendingLead = { lead: sentence, at: Date.now() };
+    } catch (e) {
+      /* no synthesiser: the brief will say the whole thing later as before */
+    }
+  }
+
+  // Watch the answer arrive. `setBody` is called with the whole answer so far
+  // on every frame, so the first sentence is available as soon as it is whole.
+  var liveBase = typeof openLiveTurn === 'function' ? openLiveTurn : null;
+  if (liveBase) {
+    openLiveTurn = function (turn) {
+      var live = liveBase(turn);
+      if (!live || typeof live.setBody !== 'function') return live;
+
+      var base = live.setBody;
+      var led = false;
+      live.setBody = function (raw) {
+        // S.speak is the operator's own switch. A desk told not to talk must
+        // not start talking earlier.
+        if (!led && S.speak) {
+          var lead = leadSentence(raw);
+          if (lead) {
+            led = true;
+            sayLead(lead);
+          }
+        }
+        return base.apply(live, arguments);
+      };
+      return live;
+    };
+  }
+
+  // The desk's own speak() cancels whatever is playing before it starts. That
+  // is right when it is replacing an answer and wrong when it is continuing
+  // one: the lead would be cut off mid-word by the brief that was meant to
+  // follow it.
+  var speakBase = typeof speak === 'function' ? speak : null;
+  if (speakBase) {
+    speak = function (text) {
+      var early = pendingLead;
+      pendingLead = null;
+
+      if (!early || Date.now() - early.at > LEAD_MAX_AGE_MS || !sameStart(text, early.lead)) {
+        return speakBase(text);
+      }
+
+      try {
+        var u = new SpeechSynthesisUtterance(String(text).slice(0, 900));
+        // Carried on the utterance because the desk's speak() takes one
+        // argument and this has to reach the panel that does the rewriting.
+        u.__saSpokenLead = early.lead;
+        window.speechSynthesis.speak(u); // deliberately not cancelling
+      } catch (e) {
+        speakBase(text);
+      }
+      return undefined;
+    };
+  }
+
+  // ---------------------------------------------------------------------
   // Waking up
   // ---------------------------------------------------------------------
   //
@@ -362,6 +498,15 @@
     var hour = new Date().getHours();
     var parts = [(hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening') + ', ' + S.name + '.'];
 
+    // Nothing came back, so nothing is claimed. "No goals armed" here would be
+    // an answer invented out of a call that failed — and the greeting exists to
+    // report what happened while the tab was shut, which is exactly what a desk
+    // that cannot reach its server does not know.
+    if (!state) {
+      parts.push('I cannot reach the server, so this is a local greeting only.');
+      return parts.join(' ');
+    }
+
     parts.push(armed ? plural(armed, 'goal', 'goals') + ' armed.' : 'No goals armed.');
 
     // Only what happened since the tab was last open is news.
@@ -380,37 +525,98 @@
     return parts.join(' ');
   }
 
-  function wake() {
-    if (!S.dataBase) return;
-    Promise.all([
+  // How long the greeting waits for the server to tell it something worth
+  // adding. Past this it is said anyway: a desk that stays silent because a
+  // status call is slow has told the operator nothing at all, which is worse
+  // than telling them the half it always knew.
+  var WAKE_ENRICH_MS = 1200;
+
+  // Why the last greeting had nothing from the server, kept for diagnosis. The
+  // greeting used to swallow this and simply not happen, which left no way to
+  // tell a missing DATA PROXY from a broken one from a desk that never woke.
+  var lastWakeError = null;
+
+  function serverState() {
+    if (!S.dataBase) return Promise.resolve(null);
+    return Promise.all([
       proxy('/api/autonomy').then(readJson),
       proxy('/api/autonomy/activity?limit=20').then(readJson),
     ])
       .then(function (both) {
-        if (both[0].status !== 200) return;
-        var line = wakeLine(both[0].body, both[1].body);
-        pushTurn({
-          user: '(waking up)',
-          agentId: 'chief',
-          agentName: 'Chief of staff',
-          color: 'cyan',
-          md: line,
-          text: line,
-          pre: null,
-          actions: [],
-          t: Date.now(),
-        });
-        speak(line);
+        if (both[0].status !== 200) {
+          lastWakeError = 'autonomy responded ' + both[0].status;
+          return null;
+        }
+        return both;
       })
-      .catch(function () {
-        /* a greeting is not worth an error card */
+      .catch(function (err) {
+        lastWakeError = (err && err.message) || String(err);
+        return null;
       });
+  }
+
+  function wake() {
+    if (!S.dataBase) lastWakeError = 'no DATA PROXY configured';
+
+    // The hour and the operator's name are known before anything is asked of
+    // anyone, so the greeting never depends on a round trip completing. What
+    // the server knows — goals armed, what fired overnight — is news, and news
+    // is allowed to arrive late or not at all.
+    var settled = false;
+    function greet(both) {
+      if (settled) return;
+      settled = true;
+      var line = wakeLine(both && both[0].body, both && both[1].body);
+      pushTurn({
+        user: '(waking up)',
+        agentId: 'chief',
+        agentName: 'Chief of staff',
+        color: 'cyan',
+        md: line,
+        text: line,
+        pre: null,
+        actions: [],
+        t: Date.now(),
+      });
+      try {
+        speak(line);
+      } catch (e) {
+        /* a greeting is not worth an error card */
+      }
+    }
+
+    var timer = setTimeout(function () {
+      greet(null);
+    }, WAKE_ENRICH_MS);
+
+    serverState().then(function (both) {
+      clearTimeout(timer);
+      greet(both);
+    });
+  }
+
+  // Speech on a phone may only start from something the operator did. The
+  // greeting arrives on a timer, after a network call, which is not that — so
+  // the synthesiser is opened here, inside the tap that entered the desk, with
+  // an utterance that says nothing. What is spoken later inherits the
+  // permission this one was granted.
+  function primeSpeech() {
+    try {
+      if (!('speechSynthesis' in window)) return;
+      var u = new SpeechSynthesisUtterance(' ');
+      u.volume = 0;
+      u.__saPrime = true; // the server panel's patch lets this one straight through
+      window.speechSynthesis.speak(u);
+    } catch (e) {
+      /* no synthesiser here; nothing was going to be spoken anyway */
+    }
   }
 
   // Fires on entering the desk rather than at load, so it lands after the HUD
   // is visible and never speaks to an empty room.
   var enterBase = window.__saEnter;
   window.__saEnter = function () {
+    primeSpeech(); // synchronous, inside the tap — this is the whole point of it
     if (typeof enterBase === 'function') {
       try {
         enterBase();
@@ -423,5 +629,13 @@
 
   // A test seam. These are pure functions with no side effects; exposing them
   // is what lets them be asserted directly rather than through the DOM.
-  window.__saExt = { acknowledge: acknowledge, wakeLine: wakeLine };
+  window.__saExt = {
+    acknowledge: acknowledge,
+    wakeLine: wakeLine,
+    leadSentence: leadSentence,
+    wake: wake,
+    wakeError: function () {
+      return lastWakeError;
+    },
+  };
 })();

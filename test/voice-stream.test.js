@@ -205,6 +205,50 @@ test('a model too slow to start is not waited on in silence', async () => {
   assert.equal(aborted, true);
 });
 
+test('a brief that repeats what was already said drops its opener', async () => {
+  clearVoiceCache();
+  aborted = false;
+  firstDelayMs = 0;
+  perDeltaMs = 8;
+  // The desk said the answer's own first sentence the moment it existed. The
+  // model, summarising the same answer afterwards, opens by making that point
+  // again — which is the common case, and saying it twice is worse than either.
+  deltas = [
+    'Nvidia still screens as a buy with momentum intact. ',
+    'Valuation is the caveat worth watching.',
+  ];
+
+  const res = await streamBrief({
+    text: 'Momentum is constructive with price 12.4531% above the 200-day average [1].',
+    spokenLead: 'Nvidia still screens as a buy, with momentum intact.',
+  });
+
+  const sentences = res.events.filter((e) => e.type === 'sentence');
+  assert.deepEqual(scripts(sentences), ['Valuation is the caveat worth watching.']);
+  assert.doesNotMatch(JSON.stringify(res.events), /screens as a buy/);
+});
+
+test('a brief that opens with something new keeps it', async () => {
+  clearVoiceCache();
+  aborted = false;
+  firstDelayMs = 0;
+  perDeltaMs = 8;
+  // Nothing here restates the lead. Dropping it on the assumption that it did
+  // would lose a sentence the listener gets no second chance at.
+  deltas = ['Earnings land on Thursday after the close. ', 'That is the risk to the position.'];
+
+  const res = await streamBrief({
+    text: 'Momentum is constructive with price 12.4531% above the 200-day average [1].',
+    spokenLead: 'Nvidia still screens as a buy, with momentum intact.',
+  });
+
+  const sentences = res.events.filter((e) => e.type === 'sentence');
+  assert.deepEqual(scripts(sentences), [
+    'Earnings land on Thursday after the close.',
+    'That is the risk to the position.',
+  ]);
+});
+
 test('the upstream key never travels back to the caller', async () => {
   clearVoiceCache();
   aborted = false;

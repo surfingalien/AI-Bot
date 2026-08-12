@@ -14,6 +14,7 @@ import { portfolioRouter } from './routes/portfolio.js';
 import { predictionsRouter } from './routes/predictions.js';
 import { analysisRouter } from './routes/analysis.js';
 import { bookRouter } from './routes/book.js';
+import { pwaRouter } from './routes/pwa.js';
 import { emailConfigured } from './lib/email.js';
 import { diagnoseFailure } from './lib/reachability.js';
 import { status } from './autonomy/engine.js';
@@ -87,6 +88,14 @@ export function createApp() {
 
   // Health stays open so a load balancer never needs the secret.
   app.get('/api/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
+
+  // Install metadata sits outside the lock. It carries nothing secret — a name,
+  // two colours and a drawn icon — and a browser decides whether a site is
+  // installable before anyone has signed in. Behind the lock it would 401 at
+  // exactly the moment the decision is made, and the desk would simply never
+  // offer to install.
+  app.use(pwaRouter);
+
   app.use(authMiddleware);
 
   // Capability advertisement. Booleans only — no secret ever crosses this line.
