@@ -192,6 +192,25 @@ check(
   (spoken[0] || '').slice(0, 80),
 );
 
+console.log('\n  waking up');
+// The wake line reports what the server did while the tab was shut, so it can
+// only come from the server — the browser has no way to know it.
+const wake = await page.evaluate(() =>
+  [...document.querySelectorAll('.turn')].map((t) => t.innerText).find((t) => /waking up/.test(t)) || '',
+);
+check('the desk reports the server state on entry', /goals? armed/i.test(wake), wake.replace(/\n/g, ' ').slice(0, 90));
+
+console.log('\n  the acknowledgement');
+// Timed rather than merely present: the claim is that it costs no round trip,
+// and a check that only asserts the text would pass on a slow implementation.
+const ack = await page.evaluate(() => {
+  const started = performance.now();
+  const line = window.__saExt.acknowledge('what do you make of https://www.reuters.com/markets/x');
+  return { line, ms: performance.now() - started };
+});
+check('it is built from the utterance alone', ack.line === 'Reading reuters.com…', ack.line);
+check('and costs no measurable time', ack.ms < 5, `${ack.ms.toFixed(3)} ms`);
+
 console.log('\n  booking, end to end');
 // The server appends book_restaurant into the engine's own scope, so this also
 // proves the injection landed somewhere the tool loop can actually reach.
