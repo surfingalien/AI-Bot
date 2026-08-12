@@ -112,12 +112,31 @@ test('the brief is spoken as it streams, not once it is finished', () => {
   assert.match(panel, /reader\.cancel\(\)/);
 });
 
+test('one launcher opens either panel, and neither takes the desk away', () => {
+  assert.match(panel, /function buildMenu\(\)/);
+  assert.match(panel, /function deskDrawer\(want\)/);
+
+  // The desk's own drawer is opened by its class, because the function that
+  // opens it is closure-scoped inside the engine and unreachable from here.
+  assert.match(panel, /document\.getElementById\('drawer'\)/);
+  assert.match(panel, /d\.classList\.toggle\('open', next\)/);
+
+  // Opening the server panel must not close that drawer: the composer lives
+  // inside it, so closing it to make room takes the input away.
+  const toggle = panel.slice(panel.indexOf('function toggle()'), panel.indexOf('function deskDrawer'));
+  assert.doesNotMatch(toggle, /deskDrawer\(false\)/);
+});
+
 test('the desk works out what was meant while it is still being said', () => {
   // Speculation is only safe because /api/intent answers a question rather
   // than running anything, and because a guess about the wrong words is
   // discarded rather than run.
   assert.match(panel, /function speculate\(\)/);
   assert.match(panel, /settle = setTimeout\(speculate, SETTLE_MS\)/);
+
+  // The moment speech stops is earlier than any settle timer can be, and a
+  // short utterance may end before the timer ever fires.
+  assert.match(panel, /rec\.addEventListener\('speechend', function \(\) \{/);
   assert.match(panel, /early && sameWords\(early\.key, said\) \? early\.answer : askIntent\(said\)/);
 
   // Bounded: a guess costs a request, and one of them can be a model call.

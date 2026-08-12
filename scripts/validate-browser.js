@@ -160,10 +160,28 @@ check('the engine boots', await page.evaluate(() => Boolean(window.__saInit)));
 check('no fatal banner', (await page.locator('#fatal.show').count()) === 0);
 check('the SERVER launcher mounts', (await page.locator('.sasrv-btn').count()) === 1);
 
+console.log('\n  one menu, two panels');
+await page.locator('.sasrv-btn').click();
+await page.waitForTimeout(400);
+check('the launcher opens a menu, not a panel', (await page.locator('.sasrv-menu.on').count()) === 1);
+check('offering both panels', (await page.locator('.sasrv-mitem').count()) === 2);
+
+// MISSION CONTROL is the desk's own drawer, reached by its class because the
+// function that opens it is closure-scoped inside the engine.
+await page.locator('.sasrv-mitem', { hasText: 'MISSION CONTROL' }).click();
+await page.waitForTimeout(600);
+check('mission control opens from it', (await page.locator('#drawer.open').count()) === 1);
+check('and the menu closes behind it', (await page.locator('.sasrv-menu.on').count()) === 0);
+
 console.log('\n  the panel');
 await page.locator('.sasrv-btn').click();
+await page.waitForTimeout(300);
+await page.locator('.sasrv-mitem', { hasText: 'SERVER' }).click();
 await page.waitForTimeout(900);
 check('it opens', (await page.locator('.sasrv-panel.on').count()) === 1);
+// It layers over mission control rather than closing it: that drawer holds the
+// composer and the log, so closing it to make room would take the input away.
+check('leaving the desk intact underneath', (await page.locator('#drawer.open').count()) === 1);
 const status = (await page.locator('.sasrv-stat').first().innerText()).replace(/\n/g, ' ');
 check('status reads live', /RUNNING/.test(status), status.slice(0, 90));
 
@@ -231,7 +249,10 @@ console.log('\n  booking, end to end');
 // The panel is still open from the checks above and covers the composer.
 await page.locator('.sasrv-head .sasrv-x').click();
 await page.waitForTimeout(500);
+// Dismissing it gives the desk back rather than leaving a blank screen — the
+// drawer underneath is where the composer lives.
 const composer = page.locator('#dinput');
+check('dismissing the panel gives the composer back', await composer.isVisible());
 await composer.click();
 await composer.fill('book a table for 4 at Osteria Mozza on Friday at 8pm under Suhas');
 await page.keyboard.press('Enter');
@@ -320,6 +341,68 @@ check(
   /data center/i.test(corrected),
   corrected.slice(0, 70),
 );
+
+console.log('\n  installable');
+const manifest = await page.evaluate(async () => {
+  const link = document.querySelector('link[rel="manifest"]');
+  if (!link) return null;
+  const res = await fetch(link.href);
+  return { status: res.status, body: await res.json() };
+});
+check('a manifest is served', manifest && manifest.status === 200, manifest ? manifest.body.name : 'missing');
+check(
+  'it asks for standalone, with icons',
+  manifest && manifest.body.display === 'standalone' && manifest.body.icons.length >= 2,
+  manifest ? `${manifest.body.display}, ${manifest.body.icons.length} icons` : '',
+);
+const icon = await page.evaluate(async () => {
+  const res = await fetch('/icon-192.png');
+  const buf = new Uint8Array(await res.arrayBuffer());
+  return { status: res.status, type: res.headers.get('content-type'), png: buf[1] === 0x50 && buf[2] === 0x4e, bytes: buf.length };
+});
+check('the icon is a real PNG', icon.status === 200 && icon.png, `${icon.type}, ${icon.bytes} bytes`);
+const sw = await page.evaluate(async () => {
+  const res = await fetch('/sw.js');
+  const body = await res.text();
+  return { status: res.status, cachesApi: body.includes("indexOf('/api/') === 0") };
+});
+check('a service worker is served', sw.status === 200);
+// The desk is live data. A worker that cached /api would answer a dossier from
+// yesterday, which is worse than not answering at all.
+check('and it refuses to cache anything under /api', sw.cachesApi);
+
+console.log('\n  on a phone');
+// A new page is a new context, so it carries none of the cookies the desktop
+// one unlocked with — it has to unlock for itself or it measures the 401 page.
+const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+await phone.goto(`${BASE}/?token=${TOKEN}`, { waitUntil: 'networkidle' });
+const phoneEnter = phone.locator('.enterbtn');
+if (await phoneEnter.count()) await phoneEnter.first().click();
+await phone.waitForTimeout(2000);
+const fit = await phone.evaluate(() => {
+  const de = document.documentElement;
+  const drawer = document.querySelector('.drawer');
+  const tabs = document.querySelector('.tabs');
+  const launcher = document.querySelector('.sasrv-btn.sasrv-float');
+  const composer = document.querySelector('#dinput');
+  const overlap = (a, b) => {
+    if (!a || !b) return false;
+    const r = a.getBoundingClientRect();
+    const s = b.getBoundingClientRect();
+    return r.right > s.left && r.left < s.right && r.bottom > s.top && r.top < s.bottom;
+  };
+  return {
+    horizontalScroll: de.scrollWidth > de.clientWidth,
+    drawerFillsWidth: drawer ? Math.round(drawer.getBoundingClientRect().width) >= de.clientWidth - 1 : null,
+    tabsScrollable: tabs ? getComputedStyle(tabs).overflowX === 'auto' : null,
+    launcherOverlapsComposer: overlap(launcher, composer),
+  };
+});
+check('the page does not scroll sideways', fit.horizontalScroll === false);
+check('the drawer uses the whole width instead of 470px of it', fit.drawerFillsWidth === true);
+check('the tab row scrolls rather than running off the edge', fit.tabsScrollable === true);
+check('and the launcher is clear of the composer', fit.launcherOverlapsComposer === false);
+await phone.close();
 
 check('no uncaught page errors', errors.length === 0, errors.slice(0, 2).join(' | '));
 

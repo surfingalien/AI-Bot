@@ -362,6 +362,15 @@
     var hour = new Date().getHours();
     var parts = [(hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening') + ', ' + S.name + '.'];
 
+    // Nothing came back, so nothing is claimed. "No goals armed" here would be
+    // an answer invented out of a call that failed — and the greeting exists to
+    // report what happened while the tab was shut, which is exactly what a desk
+    // that cannot reach its server does not know.
+    if (!state) {
+      parts.push('I cannot reach the server, so this is a local greeting only.');
+      return parts.join(' ');
+    }
+
     parts.push(armed ? plural(armed, 'goal', 'goals') + ' armed.' : 'No goals armed.');
 
     // Only what happened since the tab was last open is news.
@@ -380,37 +389,98 @@
     return parts.join(' ');
   }
 
-  function wake() {
-    if (!S.dataBase) return;
-    Promise.all([
+  // How long the greeting waits for the server to tell it something worth
+  // adding. Past this it is said anyway: a desk that stays silent because a
+  // status call is slow has told the operator nothing at all, which is worse
+  // than telling them the half it always knew.
+  var WAKE_ENRICH_MS = 1200;
+
+  // Why the last greeting had nothing from the server, kept for diagnosis. The
+  // greeting used to swallow this and simply not happen, which left no way to
+  // tell a missing DATA PROXY from a broken one from a desk that never woke.
+  var lastWakeError = null;
+
+  function serverState() {
+    if (!S.dataBase) return Promise.resolve(null);
+    return Promise.all([
       proxy('/api/autonomy').then(readJson),
       proxy('/api/autonomy/activity?limit=20').then(readJson),
     ])
       .then(function (both) {
-        if (both[0].status !== 200) return;
-        var line = wakeLine(both[0].body, both[1].body);
-        pushTurn({
-          user: '(waking up)',
-          agentId: 'chief',
-          agentName: 'Chief of staff',
-          color: 'cyan',
-          md: line,
-          text: line,
-          pre: null,
-          actions: [],
-          t: Date.now(),
-        });
-        speak(line);
+        if (both[0].status !== 200) {
+          lastWakeError = 'autonomy responded ' + both[0].status;
+          return null;
+        }
+        return both;
       })
-      .catch(function () {
-        /* a greeting is not worth an error card */
+      .catch(function (err) {
+        lastWakeError = (err && err.message) || String(err);
+        return null;
       });
+  }
+
+  function wake() {
+    if (!S.dataBase) lastWakeError = 'no DATA PROXY configured';
+
+    // The hour and the operator's name are known before anything is asked of
+    // anyone, so the greeting never depends on a round trip completing. What
+    // the server knows — goals armed, what fired overnight — is news, and news
+    // is allowed to arrive late or not at all.
+    var settled = false;
+    function greet(both) {
+      if (settled) return;
+      settled = true;
+      var line = wakeLine(both && both[0].body, both && both[1].body);
+      pushTurn({
+        user: '(waking up)',
+        agentId: 'chief',
+        agentName: 'Chief of staff',
+        color: 'cyan',
+        md: line,
+        text: line,
+        pre: null,
+        actions: [],
+        t: Date.now(),
+      });
+      try {
+        speak(line);
+      } catch (e) {
+        /* a greeting is not worth an error card */
+      }
+    }
+
+    var timer = setTimeout(function () {
+      greet(null);
+    }, WAKE_ENRICH_MS);
+
+    serverState().then(function (both) {
+      clearTimeout(timer);
+      greet(both);
+    });
+  }
+
+  // Speech on a phone may only start from something the operator did. The
+  // greeting arrives on a timer, after a network call, which is not that — so
+  // the synthesiser is opened here, inside the tap that entered the desk, with
+  // an utterance that says nothing. What is spoken later inherits the
+  // permission this one was granted.
+  function primeSpeech() {
+    try {
+      if (!('speechSynthesis' in window)) return;
+      var u = new SpeechSynthesisUtterance(' ');
+      u.volume = 0;
+      u.__saPrime = true; // the server panel's patch lets this one straight through
+      window.speechSynthesis.speak(u);
+    } catch (e) {
+      /* no synthesiser here; nothing was going to be spoken anyway */
+    }
   }
 
   // Fires on entering the desk rather than at load, so it lands after the HUD
   // is visible and never speaks to an empty room.
   var enterBase = window.__saEnter;
   window.__saEnter = function () {
+    primeSpeech(); // synchronous, inside the tap — this is the whole point of it
     if (typeof enterBase === 'function') {
       try {
         enterBase();
@@ -423,5 +493,12 @@
 
   // A test seam. These are pure functions with no side effects; exposing them
   // is what lets them be asserted directly rather than through the DOM.
-  window.__saExt = { acknowledge: acknowledge, wakeLine: wakeLine };
+  window.__saExt = {
+    acknowledge: acknowledge,
+    wakeLine: wakeLine,
+    wake: wake,
+    wakeError: function () {
+      return lastWakeError;
+    },
+  };
 })();

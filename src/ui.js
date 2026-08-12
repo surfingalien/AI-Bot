@@ -26,6 +26,57 @@ const ENGINE_CLOSE = '</script>';
 
 let cached = null;
 
+// What makes the desk installable, and what makes it fit a phone once it is.
+//
+// Both belong here rather than in index.html, which is authored elsewhere and
+// re-uploaded whole, and rather than in desk-server.js, whose styles are
+// namespaced by contract — these rules deliberately reach into the desk's own
+// classes, which is the one thing that file may not do.
+//
+// The selectors below are therefore a contract with the desk build: `.drawer`,
+// `.tabs`, `.tab`. A build that renames them loses the mobile layout rather
+// than breaking, which is the right way round.
+const HEAD_EXTRAS = `
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#040e22">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="SurfingAlien">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<style id="sa-fit">
+/* A phone has no room for a panel beside anything, so the drawer stops
+   pretending it is one and takes the screen — with the notch respected. */
+@media (max-width: 820px) {
+  .drawer { width: 100%; max-width: 100%; border-left: 0;
+            padding-bottom: env(safe-area-inset-bottom, 0px); }
+  /* The tab row runs off the right edge at this width. Scrolling it beats
+     wrapping it: MEMORY stays reachable and the row keeps its one-line shape. */
+  .tabs { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch;
+          scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { flex: 0 0 auto; }
+  /* Anything below this is a thumb target that was built for a cursor. */
+  .drawer .ph .x { font-size: 26px; padding: 6px 10px; margin: -6px -10px; }
+}
+/* Standalone has no browser chrome to absorb the notch or the home indicator,
+   so the page has to leave room for both itself. */
+@media (display-mode: standalone) {
+  body { padding-top: env(safe-area-inset-top, 0px); }
+}
+</style>
+<script>
+/* Registered late and quietly: an install is a nicety, and a browser without
+   service workers — or a page served over plain http — should reach a working
+   desk regardless. */
+if ('serviceWorker' in navigator) {
+  addEventListener('load', function () {
+    navigator.serviceWorker.register('/sw.js').catch(function () {});
+  });
+}
+</script>
+`;
+
 function bootstrapScript(defaults) {
   return `<script>
 /* injected by the SurfingAlien server — seeds first-run defaults only */
@@ -94,6 +145,21 @@ export function renderIndex() {
   // Tools first, so the offsets the bootstrap splice uses stay valid.
   const withTools = withEngineTools(html, index);
   const at = withTools.indexOf(ENGINE_TAG);
-  cached = withTools.slice(0, at) + bootstrapScript(defaults) + withTools.slice(at);
+  const spliced = withTools.slice(0, at) + bootstrapScript(defaults) + withTools.slice(at);
+  cached = withHead(spliced);
   return cached;
+}
+
+/**
+ * Add the install metadata and the mobile rules to <head>. A build without a
+ * closing head tag is served as it is rather than guessed at — the same rule
+ * the engine splice follows.
+ */
+function withHead(html) {
+  const close = html.indexOf('</head>');
+  if (close === -1) {
+    log.warn('no </head> in the desk — serving it without the manifest or the mobile rules');
+    return html;
+  }
+  return html.slice(0, close) + HEAD_EXTRAS + html.slice(close);
 }

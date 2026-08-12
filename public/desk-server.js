@@ -14,6 +14,7 @@
 
   var API = '';
   var open = false;
+  var menuOpen = false;
   var timer = null;
   var mounted = false;
 
@@ -73,6 +74,16 @@
     '.sasrv-btn:hover{border-color:var(--cyan,#4fd0e6);color:#fff;box-shadow:0 0 16px rgba(79,208,230,.25)}',
     '.sasrv-btn .sasrv-dot{width:8px;height:8px;border-radius:50%;background:var(--ok,#46e0a0);box-shadow:0 0 8px var(--ok,#46e0a0)}',
     '.sasrv-btn.sasrv-float{position:fixed;left:24px;bottom:24px;z-index:41}',
+    // The menu and its entries sit directly above the launcher, so the whole
+    // control is one thumb-sized target in one corner rather than two panels
+    // competing for the right-hand edge.
+    '.sasrv-menu{position:fixed;left:24px;bottom:70px;z-index:42;display:none;flex-direction:column;gap:6px;align-items:flex-start}',
+    '.sasrv-menu.on{display:flex}',
+    '.sasrv-mitem{font-family:var(--disp,sans-serif);font-weight:600;font-size:11px;letter-spacing:1px;color:var(--ink,#eaf4ff);background:var(--glass,rgba(10,30,60,.86));border:1px solid var(--line,rgba(120,190,255,.14));padding:9px 13px;border-radius:8px;cursor:pointer;backdrop-filter:blur(8px);white-space:nowrap;transition:.2s;min-height:40px;display:flex;align-items:center;gap:8px}',
+    '.sasrv-mitem:hover{border-color:var(--cyan,#4fd0e6);color:#fff;box-shadow:0 0 16px rgba(79,208,230,.25)}',
+    // On a phone the composer owns the bottom of the screen, so the launcher
+    // moves out of it rather than sitting on top of the input.
+    '@media(max-width:820px){.sasrv-btn.sasrv-float{left:12px;bottom:calc(74px + env(safe-area-inset-bottom,0px));padding:10px 13px}.sasrv-menu{left:12px;bottom:calc(120px + env(safe-area-inset-bottom,0px))}}',
     '.sasrv-panel{position:fixed;top:0;right:0;height:100%;width:430px;max-width:95vw;z-index:40;background:linear-gradient(180deg,rgba(6,20,46,.97),rgba(4,14,34,.99));border-left:1px solid var(--line,rgba(120,190,255,.14));transform:translateX(105%);transition:transform .4s cubic-bezier(.6,.05,.2,1);display:flex;flex-direction:column;backdrop-filter:blur(14px);font-family:var(--body,sans-serif)}',
     '.sasrv-panel.on{transform:translateX(0)}',
     '.sasrv-head{padding:16px 18px 12px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line,rgba(120,190,255,.14))}',
@@ -159,6 +170,10 @@
 
     synth.speak = function (utterance) {
       var text = utterance && utterance.text ? String(utterance.text) : '';
+      // The silent utterance the desk speaks inside the entry tap to open the
+      // synthesiser. It says nothing, so there is nothing to rewrite, and it
+      // has to reach the browser synchronously to count as user-activated.
+      if (utterance && utterance.__saPrime) return original(utterance);
       if (!serverReady || voiceMode === 'verbatim' || !text) return original(utterance);
 
       // Claim a ticket. If the desk starts saying something newer while the
@@ -358,6 +373,17 @@
 
       rec.addEventListener('start', bargeIn);
       rec.addEventListener('speechstart', bargeIn);
+
+      // The moment speech stops is the earliest point the words are all in,
+      // and it comes before the recogniser has finished deciding what they
+      // were. Waiting for the settle timer instead meant a short utterance —
+      // "how did nvidia do last quarter" — often ended before any guess had
+      // been made, which is exactly the case with nothing to hide the round
+      // trip behind.
+      rec.addEventListener('speechend', function () {
+        clearTimeout(settle);
+        speculate();
+      });
 
       // A new utterance. Anything guessed about the last one was about words
       // that have already been answered.
@@ -963,12 +989,72 @@
     open = !open;
     refs.panel.classList.toggle('on', open);
     if (open) {
+      // Deliberately not closing the desk's drawer. It holds the composer, the
+      // log and the tabs — it is the desk's working surface, not a panel over
+      // it — so closing it to make room would take the input away. This panel
+      // sits above it and gives it back when dismissed.
       refresh();
       timer = setInterval(refresh, 15000);
     } else if (timer) {
       clearInterval(timer);
       timer = null;
     }
+  }
+
+  /*
+   * The desk's own drawer, driven by its class rather than its function:
+   * `openDrawer` is closure-scoped inside the engine and unreachable from here,
+   * but the class it toggles is the same contract the desk's own CSS reads.
+   *
+   * The resize is not decoration. The desk positions the underline beneath the
+   * active tab by measurement, and it only re-measures on resize — so a drawer
+   * opened without one shows the underline wherever it last was.
+   */
+  function deskDrawer(want) {
+    var d = document.getElementById('drawer');
+    if (!d) return false;
+    var now = d.classList.contains('open');
+    var next = want === undefined ? !now : Boolean(want);
+    d.classList.toggle('open', next);
+    if (next && !now) {
+      try {
+        window.dispatchEvent(new Event('resize'));
+      } catch (e) {
+        /* the underline stays where it was; the drawer still opened */
+      }
+    }
+    return next;
+  }
+
+  function toggleMenu(want) {
+    menuOpen = want === undefined ? !menuOpen : Boolean(want);
+    if (refs.menu) refs.menu.classList.toggle('on', menuOpen);
+  }
+
+  function buildMenu() {
+    var menu = el('div', 'sasrv-menu');
+
+    var mission = el('button', 'sasrv-mitem', 'MISSION CONTROL');
+    mission.title = 'the desk’s own log, equity, tasks and memory — and the composer';
+    mission.onclick = function () {
+      // This panel covers it, so asking for mission control means dismissing
+      // this one. The reverse is not true: opening this one leaves the desk
+      // where it was, underneath.
+      if (open) toggle();
+      deskDrawer(true);
+      toggleMenu(false);
+    };
+
+    var server = el('button', 'sasrv-mitem', 'SERVER');
+    server.title = 'goals the server keeps running with this tab closed';
+    server.onclick = function () {
+      if (!open) toggle();
+      toggleMenu(false);
+    };
+
+    menu.appendChild(mission);
+    menu.appendChild(server);
+    return menu;
   }
 
   function mount(cfg) {
@@ -982,18 +1068,27 @@
     refs.panel = buildPanel();
     document.body.appendChild(refs.panel);
 
+    // Both panels open over the same right-hand edge, and on a phone either one
+    // covers the screen whole. One launcher opens either, so there is a single
+    // thing to reach for and only ever one panel in the way.
+    refs.menu = buildMenu();
+    document.body.appendChild(refs.menu);
+
     // Floated bottom-left rather than docked in the desk's toolbar: the drawer
     // opens over the toolbar's right edge and would swallow the click.
     var launcher = el('button', 'sasrv-btn sasrv-float');
     refs.launcherDot = el('span', 'sasrv-dot');
     launcher.appendChild(refs.launcherDot);
-    launcher.appendChild(document.createTextNode('SERVER'));
-    launcher.title = 'goals the server keeps running with this tab closed';
-    launcher.onclick = toggle;
+    launcher.appendChild(document.createTextNode('MENU'));
+    launcher.title = 'mission control, and the goals the server runs with this tab closed';
+    launcher.onclick = toggleMenu;
     document.body.appendChild(launcher);
 
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' && open) toggle();
+      if (e.key !== 'Escape') return;
+      if (menuOpen) toggleMenu(false);
+      else if (open) toggle();
+      else deskDrawer(false);
     });
 
     renderStatus(cfg);

@@ -10,8 +10,10 @@ import path from 'node:path';
 
 const source = fs.readFileSync(path.resolve(process.cwd(), 'src/desk/engine-extensions.js'), 'utf8');
 
-function loadInFakeEngine({ name = 'Operator' } = {}) {
+function loadInFakeEngine({ name = 'Operator', dataBase = '', fetch = () => new Promise(() => {}) } = {}) {
   const win = {};
+  const turns = [];
+  const spoken = [];
   const run = new Function(
     'TOOLS',
     'TOOL_BY_NAME',
@@ -24,11 +26,22 @@ function loadInFakeEngine({ name = 'Operator' } = {}) {
     'fetch',
     source,
   );
-  run([], {}, [], { name, dataBase: '' }, win, undefined, () => {}, () => {}, () => {});
-  return win.__saExt;
+  run(
+    [],
+    {},
+    [],
+    { name, dataBase },
+    win,
+    undefined,
+    (t) => turns.push(t),
+    (t) => spoken.push(t),
+    fetch,
+  );
+  return { ext: win.__saExt, turns, spoken, win };
 }
 
-const { acknowledge, wakeLine } = loadInFakeEngine();
+const { ext } = loadInFakeEngine();
+const { acknowledge, wakeLine } = ext;
 
 test('a URL is acknowledged by its host, not its query string', () => {
   assert.equal(acknowledge('what do you make of https://www.reuters.com/markets/x?y=1'), 'Reading reuters.com…');
@@ -113,4 +126,65 @@ test('with no goals armed it does not claim a quiet night', () => {
   const line = wakeLine({ goals: [] }, { activity: [] });
   assert.match(line, /No goals armed/);
   assert.doesNotMatch(line, /Nothing fired/, 'nothing could have fired — that is not news');
+});
+
+test('an unreachable server is said out loud, not answered for', () => {
+  // "No goals armed" here would be an answer invented out of a call that
+  // failed, and the greeting exists precisely to report what the browser
+  // cannot know on its own.
+  const line = wakeLine(null, null);
+  assert.match(line, /^Good (morning|afternoon|evening), Operator\./);
+  assert.match(line, /cannot reach the server/i);
+  assert.doesNotMatch(line, /goals armed/);
+});
+
+test('the desk greets even when it has no server to ask', async () => {
+  // The greeting used to require a configured proxy and a 200 back, and
+  // swallowed every reason it got neither — so on a desk that had either
+  // problem it simply never happened, silently.
+  const { ext, turns, spoken } = loadInFakeEngine({ dataBase: '' });
+  ext.wake();
+  await new Promise((r) => setTimeout(r, 50));
+
+  assert.equal(turns.length, 1, 'the greeting happens regardless');
+  assert.equal(turns[0].user, '(waking up)');
+  assert.match(turns[0].text, /^Good (morning|afternoon|evening), Operator\./);
+  assert.deepEqual(spoken, [turns[0].text], 'and is spoken, not only written');
+  assert.match(ext.wakeError(), /no DATA PROXY/, 'the reason is recoverable rather than swallowed');
+});
+
+test('a server that never answers does not hold the greeting hostage', async () => {
+  // A status call that hangs used to mean no greeting at all. It now costs the
+  // news, not the greeting.
+  const { ext, turns } = loadInFakeEngine({
+    dataBase: 'http://desk.invalid',
+    fetch: () => new Promise(() => {}), // never settles
+  });
+  const started = Date.now();
+  ext.wake();
+  await new Promise((r) => setTimeout(r, 1600));
+
+  assert.equal(turns.length, 1, 'greeted anyway');
+  assert.match(turns[0].text, /cannot reach the server/i);
+  assert.ok(Date.now() - started < 2500, 'and did not wait out the request');
+});
+
+test('a server that answers in time is quoted rather than guessed at', async () => {
+  const body = {
+    '/api/autonomy': { goals: [{ enabled: true }] },
+    '/api/autonomy/activity': { activity: [] },
+  };
+  const { ext, turns } = loadInFakeEngine({
+    dataBase: 'http://desk.test',
+    fetch: (url) => {
+      const key = Object.keys(body).find((k) => url.includes(k));
+      return Promise.resolve({ status: 200, json: () => Promise.resolve(body[key]) });
+    },
+  });
+  ext.wake();
+  await new Promise((r) => setTimeout(r, 50));
+
+  assert.equal(turns.length, 1);
+  assert.match(turns[0].text, /1 goal armed/);
+  assert.doesNotMatch(turns[0].text, /cannot reach/);
 });
