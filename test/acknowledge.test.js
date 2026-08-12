@@ -41,7 +41,7 @@ function loadInFakeEngine({ name = 'Operator', dataBase = '', fetch = () => new 
 }
 
 const { ext } = loadInFakeEngine();
-const { acknowledge, wakeLine } = ext;
+const { acknowledge, wakeLine, leadSentence } = ext;
 
 test('a URL is acknowledged by its host, not its query string', () => {
   assert.equal(acknowledge('what do you make of https://www.reuters.com/markets/x?y=1'), 'Reading reuters.com…');
@@ -95,6 +95,53 @@ test('it never touches the network', () => {
     throw new Error('acknowledge must not fetch');
   });
   assert.equal(win.__saExt.acknowledge('NVDA'), 'Pulling NVDA…');
+});
+
+test('the answer\'s opening sentence is said as soon as it is whole', () => {
+  // Trailing whitespace is the only evidence a sentence ended rather than being
+  // the part of one that has arrived so far.
+  assert.equal(leadSentence('Nvidia still screens as a buy on this'), '');
+  assert.equal(
+    leadSentence('Nvidia still screens as a buy on this setup. Momentum is'),
+    'Nvidia still screens as a buy on this setup.',
+  );
+
+  // The case that actually happens on a stream, and the one that matters most:
+  // the first delta ends with the space after the full stop and nothing else
+  // has arrived. Trimming before matching would throw that space away — the
+  // only evidence the sentence ended — and the lead would wait for the whole
+  // answer, which is the entire wait this removes.
+  assert.equal(
+    leadSentence('Nvidia still screens as a buy on this setup. '),
+    'Nvidia still screens as a buy on this setup.',
+    'a completed first delta is a lead',
+  );
+  assert.equal(
+    leadSentence('\n  Nvidia still screens as a buy on this setup.\n'),
+    'Nvidia still screens as a buy on this setup.',
+    'a newline ends it just as well as a space',
+  );
+});
+
+test('nothing is said early unless it is already speech', () => {
+  for (const [body, why] of [
+    ['## NVDA\nMomentum is constructive here. And more', 'a heading is a title, not a sentence'],
+    ['| Metric | Value |\n| Last | 142 |\nMomentum is constructive. x', 'a table is layout'],
+    ['Momentum is **constructive** here today. Next', 'markdown is written, not spoken'],
+    ['Price sits at 142.6234 dollars right now. Next', 'a figure nobody reads aloud'],
+    ['Let me pull up the latest on that for you. Next', 'preamble spends the first sentence on nothing'],
+    ['Sure. Momentum is constructive here and now', 'too short to be an answer'],
+    ['Momentum is constructive [1] here today. Next', 'a citation marker'],
+  ]) {
+    assert.equal(leadSentence(body), '', why);
+  }
+});
+
+test('a speakable opening survives the guard', () => {
+  const lead = leadSentence(
+    'Nvidia still screens as a buy, with momentum intact. Price sits about 12 percent above the average.',
+  );
+  assert.equal(lead, 'Nvidia still screens as a buy, with momentum intact.');
 });
 
 test('the wake line reports what happened while the tab was shut', () => {

@@ -19,6 +19,10 @@ voiceRouter.post('/voice/brief', rateLimit({ name: 'voice', max: 60 }), async (r
   const options = {
     title: String(req.body?.title || '').slice(0, 120),
     style: req.body?.style === 'alert' ? 'alert' : 'brief',
+    // A sentence the caller has already spoken, so the brief does not say it
+    // again. Only meaningful while streaming — a caller taking the whole script
+    // in one answer has not started speaking yet.
+    spokenLead: String(req.body?.spokenLead || '').slice(0, 400),
   };
 
   // The whole script in one answer, for callers that have nowhere to put a

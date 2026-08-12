@@ -341,6 +341,142 @@
   }
 
   // ---------------------------------------------------------------------
+  // Speaking while the answer is still being written
+  // ---------------------------------------------------------------------
+  //
+  // The desk streams its answer to the screen and then, once the last token has
+  // landed, hands the finished text to speech — which sends it away to be
+  // rewritten into a briefing. So the first spoken word waits for two model
+  // calls end to end, and the second one has not even started when the reader
+  // has already finished reading.
+  //
+  // The answer's own opening sentence exists long before either. Saying it the
+  // moment it is complete costs nothing and is not a summary of the answer, it
+  // is the answer's own words. The briefing still follows; the server is told
+  // what was said so it does not say it again.
+  //
+  // The guard below is the whole safety of this. A sentence is only spoken
+  // early when it is already speech — no markdown, no figure nobody would read
+  // aloud, not a preamble about what the desk is about to do. Anything else and
+  // nothing is spoken early at all, which is exactly what used to happen.
+
+  var LEAD_MIN_CHARS = 20;
+  var LEAD_MAX_CHARS = 220;
+
+  // "Let me pull that up." is not an answer, and leading with it would spend
+  // the one sentence the listener hears first on saying nothing.
+  var PREAMBLE =
+    /^(let me|let's|sure|certainly|of course|okay|ok|alright|right|here(?:'s| is| are)|i'?ll|i'?m |looking at|pulling|checking|first,|to answer)/i;
+
+  /**
+   * The first sentence of a partial answer, if it can be said as it stands.
+   *
+   * @param {string} body the answer so far, as markdown
+   * @returns {string} the sentence, or '' when nothing is safe to say yet
+   */
+  function leadSentence(body) {
+    var text = String(body || '');
+    if (!text.trim()) return '';
+
+    // Trailing whitespace is the only evidence a sentence has ended rather than
+    // being the part of one that has arrived so far — and on a live stream the
+    // first delta usually *is* "…today. ", with that space as its last
+    // character. Trimming the text before matching would throw away the very
+    // thing being looked for, and the lead would never fire until the answer
+    // was complete, which is the wait this exists to remove.
+    var m = text.match(/^\s*([\s\S]*?[.!?])\s/);
+    if (!m) return '';
+
+    var first = m[1].trim();
+    if (first.length < LEAD_MIN_CHARS || first.length > LEAD_MAX_CHARS) return '';
+    // Markdown, a table, a heading, a citation: written, not spoken. The shaper
+    // on the server exists for exactly this, and reaching it means waiting.
+    if (/[*_#`|[\]<>]/.test(first)) return '';
+    if (/\n/.test(first)) return '';
+    // "12.4531%" read aloud is a string of digits. One decimal place is speech;
+    // more is a spreadsheet.
+    if (/\d\.\d{2,}/.test(first)) return '';
+    if (PREAMBLE.test(first)) return '';
+    return first;
+  }
+
+  // What was said early, waiting for the brief that continues it.
+  var pendingLead = null;
+  var LEAD_MAX_AGE_MS = 120000;
+
+  function sameStart(text, lead) {
+    var a = String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    var b = String(lead || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    return Boolean(b) && a.indexOf(b) === 0;
+  }
+
+  function sayLead(sentence) {
+    try {
+      var u = new SpeechSynthesisUtterance(sentence);
+      // Say it as it is. It was judged speakable above; sending it away to be
+      // rewritten would reintroduce the wait this removes.
+      u.__saPlain = true;
+      window.speechSynthesis.speak(u);
+      pendingLead = { lead: sentence, at: Date.now() };
+    } catch (e) {
+      /* no synthesiser: the brief will say the whole thing later as before */
+    }
+  }
+
+  // Watch the answer arrive. `setBody` is called with the whole answer so far
+  // on every frame, so the first sentence is available as soon as it is whole.
+  var liveBase = typeof openLiveTurn === 'function' ? openLiveTurn : null;
+  if (liveBase) {
+    openLiveTurn = function (turn) {
+      var live = liveBase(turn);
+      if (!live || typeof live.setBody !== 'function') return live;
+
+      var base = live.setBody;
+      var led = false;
+      live.setBody = function (raw) {
+        // S.speak is the operator's own switch. A desk told not to talk must
+        // not start talking earlier.
+        if (!led && S.speak) {
+          var lead = leadSentence(raw);
+          if (lead) {
+            led = true;
+            sayLead(lead);
+          }
+        }
+        return base.apply(live, arguments);
+      };
+      return live;
+    };
+  }
+
+  // The desk's own speak() cancels whatever is playing before it starts. That
+  // is right when it is replacing an answer and wrong when it is continuing
+  // one: the lead would be cut off mid-word by the brief that was meant to
+  // follow it.
+  var speakBase = typeof speak === 'function' ? speak : null;
+  if (speakBase) {
+    speak = function (text) {
+      var early = pendingLead;
+      pendingLead = null;
+
+      if (!early || Date.now() - early.at > LEAD_MAX_AGE_MS || !sameStart(text, early.lead)) {
+        return speakBase(text);
+      }
+
+      try {
+        var u = new SpeechSynthesisUtterance(String(text).slice(0, 900));
+        // Carried on the utterance because the desk's speak() takes one
+        // argument and this has to reach the panel that does the rewriting.
+        u.__saSpokenLead = early.lead;
+        window.speechSynthesis.speak(u); // deliberately not cancelling
+      } catch (e) {
+        speakBase(text);
+      }
+      return undefined;
+    };
+  }
+
+  // ---------------------------------------------------------------------
   // Waking up
   // ---------------------------------------------------------------------
   //
@@ -496,6 +632,7 @@
   window.__saExt = {
     acknowledge: acknowledge,
     wakeLine: wakeLine,
+    leadSentence: leadSentence,
     wake: wake,
     wakeError: function () {
       return lastWakeError;

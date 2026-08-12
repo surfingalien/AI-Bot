@@ -174,6 +174,14 @@
       // synthesiser. It says nothing, so there is nothing to rewrite, and it
       // has to reach the browser synchronously to count as user-activated.
       if (utterance && utterance.__saPrime) return original(utterance);
+      // A sentence the desk has already judged safe to say as it stands — the
+      // opening line of an answer, spoken while the rest is still being
+      // written. Rewriting it would be the wait it exists to avoid.
+      if (utterance && utterance.__saPlain) {
+        lastScript = { text: text, source: 'lead', t: Date.now() };
+        renderVoice();
+        return original(utterance);
+      }
       if (!serverReady || voiceMode === 'verbatim' || !text) return original(utterance);
 
       // Claim a ticket. If the desk starts saying something newer while the
@@ -257,7 +265,14 @@
     fetch(API + '/api/voice/brief', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-      body: JSON.stringify({ text: text, title: document.title, stream: true }),
+      body: JSON.stringify({
+        text: text,
+        title: document.title,
+        stream: true,
+        // Carried on the utterance itself, because the desk's own speak() is
+        // what reaches this and it has nowhere else to put it.
+        spokenLead: (source && source.__saSpokenLead) || '',
+      }),
     })
       .then(function (r) {
         var type = r.headers.get('content-type') || '';

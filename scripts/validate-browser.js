@@ -94,7 +94,15 @@ page.on('request', (r) => {
 // is being checked is what the desk *asked* to have spoken.
 await page.addInitScript(() => {
   window.__spoken = [];
+  window.__spokenAt = [];
   window.__recs = [];
+  // The desk keeps speech off by default, and half of what is checked below is
+  // what it says out loud.
+  try {
+    localStorage.setItem('sa_speak', 'true');
+  } catch (e) {
+    /* first navigation, no origin yet — the next one sets it */
+  }
   class FakeRecognition {
     constructor() {
       window.__recs.push(this);
@@ -131,6 +139,7 @@ await page.addInitScript(() => {
       const real = window.speechSynthesis.speak.bind(window.speechSynthesis);
       window.speechSynthesis.speak = (u) => {
         window.__spoken.push(u && u.text);
+        window.__spokenAt.push(performance.now());
         return real(u);
       };
       clearInterval(wait);
@@ -341,6 +350,45 @@ check(
   /data center/i.test(corrected),
   corrected.slice(0, 70),
 );
+
+console.log('\n  speaking before the answer is finished');
+// The desk used to hand the finished answer to speech and only then send it
+// away to be rewritten, so the first spoken word waited on two model calls end
+// to end. Timed rather than merely present: a check on what was said would pass
+// just as well against the implementation that says it at the end.
+await page.evaluate(() => {
+  window.__spoken = [];
+  window.__spokenAt = [];
+});
+await composer.click();
+await composer.fill('give me your read on momentum right now please');
+await page.keyboard.press('Enter');
+
+// Waited for rather than sampled: the desk does its own work before the answer
+// starts arriving, and how long that takes is not what is being measured. What
+// is being measured is the distance between the first spoken word and the last.
+await page
+  .waitForFunction(() => window.__spoken.length >= 2, null, { timeout: 25000 })
+  .catch(() => {});
+const all = await page.evaluate(() => ({ spoken: window.__spoken.slice(), at: window.__spokenAt.slice() }));
+
+check(
+  'the answer’s own opening is spoken first, as its own utterance',
+  /^Momentum is constructive across the group today\.$/.test(all.spoken[0] || ''),
+  (all.spoken[0] || '(nothing spoken)').slice(0, 60),
+);
+// The stub holds its second sentence back by 700ms, so a gap anywhere near
+// that is proof the first was spoken while the rest was still being written.
+// Against the implementation that waited for the finished answer this was 20ms.
+check(
+  'while the rest of it is still being written',
+  all.spoken.length >= 2 && all.at[1] - all.at[0] > 300,
+  `${all.spoken.length} utterances, ${Math.round((all.at[1] || 0) - (all.at[0] || 0))}ms apart`,
+);
+// Saying it twice is worse than either, and the guard lives on the server: the
+// brief is told what was already said and drops its opener when it repeats it.
+const repeats = all.spoken.filter((s) => /Momentum is constructive across the group/.test(s || '')).length;
+check('and nothing is said twice', repeats === 1, `${repeats} utterance(s) carried the lead`);
 
 console.log('\n  installable');
 const manifest = await page.evaluate(async () => {
