@@ -142,6 +142,12 @@
   var voiceMode = 'brief'; // 'brief' | 'verbatim'
   var intentMode = true;
   var serverReady = false;
+  // Whether the server has a real voice engine configured (VOICE_TTS_BASE /
+  // VOICE_STT_BASE — e.g. a self-hosted VoiceStudio instance) behind it.
+  // Unset means the browser's own speechSynthesis/SpeechRecognition are all
+  // there is, exactly as before this file learned about either.
+  var ttsReady = false;
+  var sttReady = false;
   var speakSeq = 0;
   var lastScript = null;
   var lastIntent = null;
@@ -214,7 +220,7 @@
       said.push(script);
       lastScript = { text: said.join(' '), source: kind || 'model', t: Date.now() };
       renderVoice();
-      utter(script, source, original);
+      utter(script, source, original, ticket);
     }
 
     function readStream(reader) {
@@ -323,6 +329,58 @@
   var lastSpeechError = null;
   var voicesReady = false;
 
+  // The one audio element playing a server-synthesized sentence, if any. Held
+  // the same way `speaking` holds a browser utterance — so barge-in has
+  // something to stop, and so a superseded ticket's audio never plays over a
+  // newer one.
+  var currentAudio = null;
+
+  function stopServerAudio() {
+    if (!currentAudio) return;
+    try {
+      currentAudio.pause();
+    } catch (e) {
+      /* already stopped */
+    }
+    currentAudio = null;
+  }
+
+  /**
+   * Real synthesized speech from the server's voice engine, falling back to
+   * the browser's own synthesiser on any failure — network down, engine
+   * unconfigured mid-session, a clip that failed to decode. The desk never
+   * goes silent because a better voice was unreachable.
+   */
+  function speakServerAudio(script, source, ticket, fallback) {
+    fetch(API + '/api/voice/speak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: script }),
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error('voice engine http ' + r.status);
+        return r.blob();
+      })
+      .then(function (blob) {
+        // Superseded while the clip was generating — the operator has moved
+        // on, or started talking over the desk. Playing it now would be the
+        // exact thing barge-in exists to prevent.
+        if (ticket != null && ticket !== speakSeq) return;
+        stopServerAudio();
+        var audio = new Audio(URL.createObjectURL(blob));
+        audio.playbackRate = (source && source.rate) || 1;
+        var release = function () {
+          if (currentAudio === audio) currentAudio = null;
+        };
+        audio.onended = release;
+        audio.onerror = release;
+        currentAudio = audio;
+        var played = audio.play();
+        if (played && played.catch) played.catch(fallback);
+      })
+      .catch(fallback);
+  }
+
   function voiceCount() {
     try {
       return (window.speechSynthesis.getVoices() || []).length;
@@ -355,7 +413,25 @@
     return undefined;
   }
 
-  function utter(script, source, original) {
+  /**
+   * Speak one sentence. Tries the server's voice engine first when one is
+   * configured — natural synthesis instead of whatever the browser ships —
+   * and falls back to the browser path (below) if it is not configured, or
+   * fails. `ticket` is the same speakSeq guard `emit()` already checked; it is
+   * re-checked after the network round trip, since a barge-in can happen
+   * while the clip is still being generated.
+   */
+  function utter(script, source, original, ticket) {
+    if (ttsReady) {
+      speakServerAudio(script, source, ticket, function () {
+        utterBrowser(script, source, original);
+      });
+      return;
+    }
+    utterBrowser(script, source, original);
+  }
+
+  function utterBrowser(script, source, original) {
     whenVoicesReady(function () {
       try {
         // A no-op unless something left it paused, which is the case that
@@ -442,9 +518,138 @@
     );
   }
 
+  /**
+   * A SpeechRecognition-shaped polyfill for browsers that ship none of their
+   * own (Firefox, older Safari): record the microphone instead of streaming
+   * to a built-in recognizer, and send the clip to the server's voice engine
+   * once the operator stops talking. Installed only when no native
+   * constructor exists and the server has VOICE_STT_BASE configured, so the
+   * desk's own `initRec()` — written against the real Web Speech API — needs
+   * no changes at all: `new SpeechRecognition()` just works.
+   *
+   * The tradeoff against the native API: no live interim transcript (a
+   * recording has no partial words until it is sent), so the caption stays
+   * blank until the whole utterance comes back. Everything downstream —
+   * onresult, onend, the intent translation `installIntent` wraps around it —
+   * behaves the same either way.
+   */
+  function ServerRecognition() {
+    this.continuous = false;
+    this.interimResults = true;
+    this.lang = 'en-US';
+    this.onresult = null;
+    this.onend = null;
+    this.onerror = null;
+    this._stream = null;
+    this._recorder = null;
+    this._chunks = [];
+    this._stopped = false;
+  }
+
+  ServerRecognition.prototype._fail = function (code) {
+    this._stopped = true;
+    if (this.onerror) this.onerror({ error: code });
+    if (this.onend) this.onend();
+  };
+
+  ServerRecognition.prototype.start = function () {
+    var self = this;
+    if (!sttReady) return self._fail('service-not-allowed');
+    if (!navigator.mediaDevices || !window.MediaRecorder) return self._fail('audio-capture');
+
+    self._stopped = false;
+    navigator.mediaDevices
+      .getUserMedia({ audio: true })
+      .then(function (stream) {
+        if (self._stopped) {
+          stream.getTracks().forEach(function (t) {
+            t.stop();
+          });
+          return;
+        }
+        self._stream = stream;
+        var mime = ['audio/webm', 'audio/ogg'].filter(function (m) {
+          return window.MediaRecorder.isTypeSupported && window.MediaRecorder.isTypeSupported(m);
+        })[0];
+        try {
+          self._recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+        } catch (e) {
+          self._teardown();
+          return self._fail('audio-capture');
+        }
+        self._chunks = [];
+        self._recorder.addEventListener('dataavailable', function (e) {
+          if (e.data && e.data.size) self._chunks.push(e.data);
+        });
+        self._recorder.addEventListener('stop', function () {
+          self._teardown();
+          var blob = new Blob(self._chunks, { type: (self._recorder && self._recorder.mimeType) || 'audio/webm' });
+          self._chunks = [];
+          if (!blob.size) {
+            if (self.onend) self.onend();
+            return;
+          }
+          api('/api/voice/transcribe', {
+            method: 'POST',
+            headers: { 'Content-Type': blob.type || 'application/octet-stream' },
+            body: blob,
+          }).then(function (res) {
+            var text = res.json && res.json.ok ? String(res.json.text || '').trim() : '';
+            if (text && self.onresult) {
+              var alt = { transcript: text, confidence: 1 };
+              var entry = [alt];
+              entry.isFinal = true;
+              var list = [entry];
+              list.length = 1;
+              self.onresult({ resultIndex: 0, results: list });
+            }
+            if (self.onend) self.onend();
+          });
+        });
+        self._recorder.start();
+      })
+      .catch(function () {
+        self._fail('not-allowed');
+      });
+  };
+
+  ServerRecognition.prototype._teardown = function () {
+    if (this._stream) {
+      this._stream.getTracks().forEach(function (t) {
+        t.stop();
+      });
+      this._stream = null;
+    }
+  };
+
+  ServerRecognition.prototype.stop = function () {
+    this._stopped = true;
+    if (this._recorder && this._recorder.state !== 'inactive') {
+      try {
+        this._recorder.stop();
+      } catch (e) {
+        this._teardown();
+      }
+    } else {
+      this._teardown();
+    }
+  };
+
+  ServerRecognition.prototype.abort = ServerRecognition.prototype.stop;
+
   function installIntent() {
     var Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!Ctor || window.__saIntentPatched) return;
+    if (!Ctor) {
+      // No native recognizer in this browser. The server-recording fallback
+      // stands in for it under the same global names, so the desk's own mic
+      // code never has to know which one it got — it fails loudly through the
+      // normal onerror path when the server has no voice engine configured
+      // either, exactly as it would have with no recognizer at all.
+      window.SpeechRecognition = ServerRecognition;
+      window.webkitSpeechRecognition = ServerRecognition;
+      return;
+    }
+    if (window.__saIntentPatched) return;
     window.__saIntentPatched = true;
 
     function Wrapped() {
@@ -465,6 +670,7 @@
       // over them.
       function bargeIn() {
         speakSeq++;
+        stopServerAudio();
         try {
           window.speechSynthesis.cancel();
         } catch (e) {
@@ -836,6 +1042,9 @@
         mk.breakerOpen ? 'off' : 'ok',
       ),
     );
+    var vc = cfg.voice || {};
+    box.appendChild(cell('voice out', vc.tts ? 'SERVER' : 'BROWSER', vc.tts ? 'ok' : 'off'));
+    box.appendChild(cell('voice in', vc.stt ? 'SERVER' : 'BROWSER', vc.stt ? 'ok' : 'off'));
 
     if (refs.launcherDot) {
       refs.launcherDot.style.background = au.running ? 'var(--ok,#46e0a0)' : 'var(--amber,#f5c451)';
@@ -1179,6 +1388,10 @@
   }
 
   function mount(cfg) {
+    var vc = cfg.voice || {};
+    ttsReady = Boolean(vc.tts);
+    sttReady = Boolean(vc.stt);
+
     if (mounted) return;
     mounted = true;
 

@@ -293,6 +293,17 @@ try {
     body: { text: '## X\n| a | b |\n|---|---|\n| 1 | 2 |\n\nUp 12.4531% today.' },
   });
   await hit('intent', 'POST', '/api/intent', { body: { transcript: "how's my portfolio doing" } });
+  // No VOICE_TTS_BASE/VOICE_STT_BASE in this run, so both say so rather than
+  // guessing — the same contract booking's unconfigured 501 checks below.
+  await hit('speak (unconfigured)', 'POST', '/api/voice/speak', { body: { text: 'hi' }, expect: [503] });
+  {
+    const res = await fetch(`${BASE}/api/voice/transcribe`, {
+      method: 'POST',
+      headers: { ...AUTH, 'Content-Type': 'audio/webm' },
+      body: Buffer.from('fake-audio'),
+    });
+    record('transcribe (unconfigured, POST /api/voice/transcribe)', res.status === 503, String(res.status));
+  }
 
   console.log('\n── autonomy ──');
   const armed = await hit('arm a goal', 'POST', '/api/autonomy/goals', {

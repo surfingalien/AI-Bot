@@ -52,6 +52,8 @@ test('the panel talks to the server only through documented endpoints', () => {
     '/api/autonomy/goals',
     '/api/genome',
     '/api/voice/brief',
+    '/api/voice/speak',
+    '/api/voice/transcribe',
     '/api/intent',
     '/api/diagnostics',
   ]);
