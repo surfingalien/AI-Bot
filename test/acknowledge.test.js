@@ -14,13 +14,28 @@ function loadInFakeEngine({ name = 'Operator', dataBase = '', fetch = () => new 
   const win = {};
   const turns = [];
   const spoken = [];
+  // The desk's settings panel, reduced to the two things the wrapper touches:
+  // a class that records whether it is open, and the argument openPop was given.
+  const pop = { open: false, calls: [] };
+  const openPop = (o) => {
+    pop.calls.push(o);
+    if (o) pop.open = true;
+    else if (o === false) pop.open = false;
+    else pop.open = !pop.open; // the desk's own toggle-by-undefined
+  };
+  const document = {
+    getElementById: (id) => (id === 'pop' ? { classList: { contains: () => pop.open } } : null),
+  };
+
   const run = new Function(
     'TOOLS',
     'TOOL_BY_NAME',
     'TOOL_SCHEMAS',
     'S',
     'window',
+    'document',
     'openLiveTurn',
+    'openPop',
     'pushTurn',
     'speak',
     'fetch',
@@ -32,12 +47,14 @@ function loadInFakeEngine({ name = 'Operator', dataBase = '', fetch = () => new 
     [],
     { name, dataBase },
     win,
+    document,
     undefined,
+    openPop,
     (t) => turns.push(t),
     (t) => spoken.push(t),
     fetch,
   );
-  return { ext: win.__saExt, turns, spoken, win };
+  return { ext: win.__saExt, turns, spoken, win, pop };
 }
 
 const { ext } = loadInFakeEngine();
@@ -95,6 +112,37 @@ test('it never touches the network', () => {
     throw new Error('acknowledge must not fetch');
   });
   assert.equal(win.__saExt.acknowledge('NVDA'), 'Pulling NVDA…');
+});
+
+test('opening the settings panel fills it instead of emptying it', () => {
+  // The desk's settings button calls openPop() with no argument. openPop
+  // toggles by that argument and only fills the fields and switches when it is
+  // truthy — so the panel opened blank, and SAVE read those blanks back over
+  // the API key, the model base, the DATA PROXY, and turned SPEAK and BRAIN
+  // off. Opening the panel was what destroyed the configuration; refreshing
+  // only showed the result.
+  const { ext, pop } = loadInFakeEngine();
+
+  ext.openPop();
+  assert.deepEqual(pop.calls, [true], 'the omitted argument is resolved, so the fill runs');
+  assert.equal(pop.open, true);
+
+  // And it still toggles: a second press closes it.
+  ext.openPop();
+  assert.deepEqual(pop.calls, [true, false]);
+  assert.equal(pop.open, false);
+});
+
+test('an explicit argument is passed through untouched', () => {
+  // A later desk build that fixes this passes a boolean, and must get exactly
+  // what it asked for rather than a toggle computed behind its back.
+  const { ext, pop } = loadInFakeEngine();
+
+  ext.openPop(false);
+  ext.openPop(true);
+  ext.openPop(true);
+  assert.deepEqual(pop.calls, [false, true, true]);
+  assert.equal(pop.open, true);
 });
 
 test('the answer\'s opening sentence is said as soon as it is whole', () => {

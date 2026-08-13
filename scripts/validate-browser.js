@@ -452,6 +452,63 @@ check('the tab row scrolls rather than running off the edge', fit.tabsScrollable
 check('and the launcher is clear of the composer', fit.launcherOverlapsComposer === false);
 await phone.close();
 
+console.log('\n  settings that stay saved');
+// Opening the settings panel used to empty it: the button calls openPop() with
+// no argument, and the fill only ran when that argument was truthy. SAVE then
+// read the blanks back over the API key, the model base and the DATA PROXY, and
+// turned SPEAK off — so the desk lost its configuration and stopped talking,
+// and both looked like separate faults.
+const settings = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+await settings.goto(`${BASE}/?token=${TOKEN}`, { waitUntil: 'networkidle' });
+const enterSettings = async () => {
+  await settings.evaluate(() => document.querySelector('.enterbtn')?.click());
+  await settings.waitForTimeout(1600);
+};
+await enterSettings();
+
+const seeded = await settings.evaluate(() => ({
+  base: JSON.parse(localStorage.getItem('sa_base') || '""'),
+  data: JSON.parse(localStorage.getItem('sa_dataBase') || '""'),
+}));
+await settings.evaluate(() => document.querySelector('#setBtn')?.click());
+await settings.waitForTimeout(500);
+const shown = await settings.evaluate(() => ({
+  base: document.getElementById('setBase')?.value,
+  data: document.getElementById('setData')?.value,
+}));
+check(
+  'the panel opens showing what is configured',
+  Boolean(shown.base) && shown.base === seeded.base && shown.data === seeded.data,
+  shown.base ? shown.base : '(blank — it would save this over the real one)',
+);
+
+// An operator types a key, turns SPEAK on, saves.
+await settings.evaluate(() => {
+  document.getElementById('setKey').value = 'sk-validation-key';
+  const sp = document.getElementById('swSpeak');
+  if (sp && !sp.classList.contains('on')) sp.click();
+  document.getElementById('setSave').click();
+});
+await settings.waitForTimeout(1200);
+await settings.reload({ waitUntil: 'networkidle' });
+await settings.waitForTimeout(1000);
+await enterSettings();
+
+const kept = await settings.evaluate(() => ({
+  key: JSON.parse(localStorage.getItem('sa_key') || '""'),
+  base: JSON.parse(localStorage.getItem('sa_base') || '""'),
+  data: JSON.parse(localStorage.getItem('sa_dataBase') || '""'),
+  speak: JSON.parse(localStorage.getItem('sa_speak') || 'false'),
+}));
+check('a saved key survives a refresh', kept.key === 'sk-validation-key', kept.key || '(gone)');
+check(
+  'and saving does not blank what it did not ask about',
+  kept.base === seeded.base && kept.data === seeded.data,
+  `base=${kept.base || '(blank)'}`,
+);
+check('and SPEAK stays on, so the desk still talks', kept.speak === true, String(kept.speak));
+await settings.close();
+
 check('no uncaught page errors', errors.length === 0, errors.slice(0, 2).join(' | '));
 
 await browser.close();
