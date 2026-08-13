@@ -112,6 +112,35 @@ test('the brief is spoken as it streams, not once it is finished', () => {
   assert.match(panel, /reader\.cancel\(\)/);
 });
 
+test('a correct utterance is actually got as far as a speaker', () => {
+  // Everything upstream can be right and still make no sound. These are the
+  // three ways a browser swallows speech, none of which the code that asked
+  // for it can see.
+  assert.match(panel, /function whenVoicesReady\(run\)/, 'voices load asynchronously');
+  assert.match(panel, /voiceschanged/);
+  assert.match(panel, /if \(window\.speechSynthesis\.paused\) window\.speechSynthesis\.resume\(\)/);
+  assert.match(panel, /speaking\.push\(u\)/, 'a reference, so it cannot be collected mid-sentence');
+
+  // The wait is bounded: a browser with no voices never fires voiceschanged,
+  // and hanging on that would be a worse failure than speaking into a void.
+  assert.match(panel, /setTimeout\(go, VOICES_WAIT_MS\)/);
+
+  // And the failure is recorded rather than swallowed, because "it is silent"
+  // is a symptom and not a diagnosis.
+  assert.match(panel, /u\.onerror = release/);
+  assert.match(panel, /lastSpeechError = String\(ev\.error\)/);
+});
+
+test('the panel says why it is not talking, not just that it is not', () => {
+  const status = panel.slice(panel.indexOf('function voiceStatus()'), panel.indexOf('function renderVoice()'));
+  // Four different causes, only one of which is fixable here — and the old
+  // line blamed the one switch for all of them.
+  assert.match(status, /no speech synthesis/);
+  assert.match(status, /No voices are installed/);
+  assert.match(status, /refused the last thing/);
+  assert.match(status, /SPEAK is on in its settings/);
+});
+
 test('one launcher opens either panel, and neither takes the desk away', () => {
   assert.match(panel, /function buildMenu\(\)/);
   assert.match(panel, /function deskDrawer\(want\)/);
