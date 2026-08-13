@@ -341,6 +341,36 @@
   }
 
   // ---------------------------------------------------------------------
+  // The settings panel, which was emptying itself
+  // ---------------------------------------------------------------------
+  //
+  // `openPop(o)` does two things: it toggles the panel by `o`, and — only when
+  // `o` is truthy — it fills the fields and the switches from the current
+  // settings. The settings button calls it with no argument at all. So the
+  // panel opens (because toggling by `undefined` adds the class) with every
+  // field blank and every switch off, and SAVE then reads those blanks back
+  // into the settings: the API key, the model base URL and the DATA PROXY are
+  // overwritten with empty strings, and SPEAK and BRAIN are turned off.
+  //
+  // The operator sees settings that will not stay saved and a desk that has
+  // stopped talking, and both are the same bug. Opening the panel is what
+  // destroys the configuration; refreshing merely shows the result.
+  //
+  // Resolving the argument the caller omitted is the whole fix. A later desk
+  // build that passes one explicitly gets exactly what it asked for, so this
+  // stops mattering the moment it is fixed upstream.
+  var popBase = typeof openPop === 'function' ? openPop : null;
+  if (popBase) {
+    openPop = function (o) {
+      if (o !== undefined) return popBase(o);
+      var pop = document.getElementById('pop');
+      // No argument means toggle. The panel's own class is the only record of
+      // which way that goes.
+      return popBase(!(pop && pop.classList.contains('open')));
+    };
+  }
+
+  // ---------------------------------------------------------------------
   // Speaking while the answer is still being written
   // ---------------------------------------------------------------------
   //
@@ -633,6 +663,9 @@
     acknowledge: acknowledge,
     wakeLine: wakeLine,
     leadSentence: leadSentence,
+    // The wrapper, not the desk's own — exposed so the argument it resolves can
+    // be asserted without a browser.
+    openPop: typeof openPop === 'function' ? openPop : null,
     wake: wake,
     wakeError: function () {
       return lastWakeError;
