@@ -150,6 +150,27 @@ export const config = {
     // before it expires. Nothing here degrades badly on expiry — a brief falls
     // back to the rules script, an intent passes through as spoken.
     brainTimeoutMs: int(env.VOICE_BRAIN_TIMEOUT_MS, 8000),
+
+    // A second OpenAI-compatible upstream, dedicated to voice: real speech
+    // synthesis and transcription in place of the browser's own. Points at a
+    // self-hosted engine (e.g. VoiceStudio) or a hosted TTS/Whisper provider —
+    // anything that speaks the /audio/speech and /audio/transcriptions
+    // dialect. Unset means the browser's speechSynthesis/SpeechRecognition
+    // keep doing the job, exactly as before.
+    tts: {
+      base: (env.VOICE_TTS_BASE || '').replace(/\/+$/, ''),
+      key: env.VOICE_TTS_KEY || '',
+      model: env.VOICE_TTS_MODEL || 'tts-1',
+      voice: env.VOICE_TTS_VOICE || 'alloy',
+      format: env.VOICE_TTS_FORMAT || 'mp3',
+      timeoutMs: int(env.VOICE_TTS_TIMEOUT_MS, 20000),
+    },
+    stt: {
+      base: (env.VOICE_STT_BASE || '').replace(/\/+$/, ''),
+      key: env.VOICE_STT_KEY || '',
+      model: env.VOICE_STT_MODEL || 'whisper-1',
+      timeoutMs: int(env.VOICE_STT_TIMEOUT_MS, 20000),
+    },
   },
 
   booking: {
@@ -181,6 +202,14 @@ export function authRequired() {
 
 export function brainConfigured() {
   return Boolean(config.brain.base);
+}
+
+export function voiceTtsConfigured() {
+  return Boolean(config.voice.tts.base);
+}
+
+export function voiceSttConfigured() {
+  return Boolean(config.voice.stt.base);
 }
 
 export function bookingConfigured() {

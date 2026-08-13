@@ -1,6 +1,13 @@
 import express from 'express';
 import path from 'node:path';
-import { config, brainConfigured, authRequired, bookingConfigured } from './config.js';
+import {
+  config,
+  brainConfigured,
+  authRequired,
+  bookingConfigured,
+  voiceTtsConfigured,
+  voiceSttConfigured,
+} from './config.js';
 import { authMiddleware } from './lib/auth.js';
 import { renderIndex } from './ui.js';
 import { fetchRouter } from './routes/fetch.js';
@@ -112,7 +119,7 @@ export function createApp() {
       },
       egress: { privateAllowed: config.fetch.allowPrivateEgress },
       auth: { required: authRequired() },
-      voice: { alerts: config.notify.voice },
+      voice: { alerts: config.notify.voice, tts: voiceTtsConfigured(), stt: voiceSttConfigured() },
       email: { configured: emailConfigured() },
       booking: { configured: bookingConfigured(), provider: config.booking.provider },
       analysis: { persona: config.analysis.persona },

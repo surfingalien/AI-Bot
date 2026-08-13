@@ -4,9 +4,11 @@
 // failing — a caller mid-sentence, or mid-utterance, has nothing useful to do
 // with an error.
 
-import { Router } from 'express';
+import { Router, raw } from 'express';
 import { briefFor, briefStream } from '../lib/voiceBrief.js';
 import { resolveIntent } from '../lib/intent.js';
+import { synthesizeSpeech, transcribeAudio, VoiceEngineError } from '../lib/voiceEngine.js';
+import { voiceTtsConfigured, voiceSttConfigured } from '../config.js';
 import { rateLimit } from '../lib/rateLimit.js';
 import { log } from '../lib/log.js';
 
@@ -70,3 +72,60 @@ voiceRouter.post('/intent', rateLimit({ name: 'intent', max: 60 }), async (req, 
   const result = await resolveIntent(transcript);
   return res.json({ ok: true, transcript, ...result });
 });
+
+// Text -> real synthesized speech, when a voice engine is configured. Absent
+// one, the browser's own speechSynthesis is what speaks — this endpoint
+// simply does not exist for it to call.
+voiceRouter.post('/voice/speak', rateLimit({ name: 'voice-speak', max: 60 }), async (req, res) => {
+  if (!voiceTtsConfigured()) {
+    return res
+      .status(503)
+      .json({ ok: false, error: 'voice synthesis not configured on this server (set VOICE_TTS_BASE)' });
+  }
+  const text = String(req.body?.text || '').trim();
+  if (!text) return res.status(400).json({ ok: false, error: 'text required' });
+
+  try {
+    const { buffer, contentType } = await synthesizeSpeech(text.slice(0, 2000), {
+      voice: req.body?.voice ? String(req.body.voice).slice(0, 60) : undefined,
+    });
+    res.set('Content-Type', contentType);
+    res.set('Cache-Control', 'no-store');
+    return res.send(buffer);
+  } catch (err) {
+    const status = err instanceof VoiceEngineError ? err.status : 502;
+    log.warn(`voice speak failed: ${err?.message || err}`);
+    return res.status(status).json({ ok: false, error: err?.message || 'synthesis failed' });
+  }
+});
+
+// Recorded audio -> transcript, when a voice engine is configured. This is
+// the fallback path for browsers with no SpeechRecognition of their own
+// (Firefox, Safari) — the desk records instead of streaming to the browser's
+// built-in recognizer, then sends the clip here once the operator stops
+// talking.
+voiceRouter.post(
+  '/voice/transcribe',
+  rateLimit({ name: 'voice-transcribe', max: 30 }),
+  raw({ type: () => true, limit: '15mb' }),
+  async (req, res) => {
+    if (!voiceSttConfigured()) {
+      return res
+        .status(503)
+        .json({ ok: false, error: 'transcription not configured on this server (set VOICE_STT_BASE)' });
+    }
+    const bytes = req.body;
+    if (!Buffer.isBuffer(bytes) || !bytes.length) {
+      return res.status(400).json({ ok: false, error: 'audio body required' });
+    }
+
+    try {
+      const text = await transcribeAudio(bytes, { mimeType: req.headers['content-type'] });
+      return res.json({ ok: true, text: text.trim() });
+    } catch (err) {
+      const status = err instanceof VoiceEngineError ? err.status : 502;
+      log.warn(`voice transcribe failed: ${err?.message || err}`);
+      return res.status(status).json({ ok: false, error: err?.message || 'transcription failed' });
+    }
+  },
+);

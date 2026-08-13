@@ -23,6 +23,7 @@ the tab is closed.
 │  /api/autonomy/*     goals that fire     │
 │  /api/genome         brain transfer      │
 │  /api/voice/brief    speech, not recital │
+│  /api/voice/speak    real TTS + ASR      │
 │  /api/intent         English in, cmds out│
 │  /api/portfolio      positions priced now│
 │  /api/diagnostics    where the time goes │
@@ -273,6 +274,39 @@ constructor: it holds the desk's own handlers, translates on the way through,
 and hands the result back in the shape the handler already expects. **INTENT
 ON/OFF** in the panel controls it, and the panel shows both what was heard and
 what was run.
+
+### A real voice, and a real ear — `VOICE_TTS_BASE` / `VOICE_STT_BASE`
+
+Everything above still speaks through the browser's `speechSynthesis` and
+listens through its `SpeechRecognition` — robotic, and Chrome/Edge-only. Set
+either of these and the desk gets a second OpenAI-compatible upstream
+dedicated to voice, speaking the same `/audio/speech` and
+`/audio/transcriptions` dialect OpenAI's TTS and Whisper APIs use. Point it at
+a self-hosted engine — [VoiceStudio](https://github.com/debpalash/VoiceStudio)
+is an open-source ElevenLabs alternative with voice cloning and local Whisper
+ASR — or at OpenAI directly. Leave both unset and nothing changes.
+
+`GET /api/config` reports `voice.tts`/`voice.stt` so the panel knows which is
+live; the SERVER panel's status grid shows **VOICE OUT** / **VOICE IN** as
+`SERVER` or `BROWSER` accordingly.
+
+- **`POST /api/voice/speak`** — `{ text }` in, synthesized audio bytes out.
+  `desk-server.js` calls this for every sentence a brief speaks, playing the
+  result through an `<audio>` element instead of a `SpeechSynthesisUtterance`.
+  A failure — the engine down, a bad clip — falls back to the browser voice
+  silently; the desk never goes quiet because a better voice was unreachable.
+- **`POST /api/voice/transcribe`** — a recorded clip in, `{ text }` out.
+  Firefox and Safari ship no `SpeechRecognition` at all, so `desk-server.js`
+  installs a drop-in replacement under that same global name when one is
+  configured: it records the microphone with `MediaRecorder` instead of
+  streaming to a built-in recognizer, then sends the clip here once the
+  operator stops talking. The desk's own mic code — `initRec()`, the wave
+  visualizer, `Space` to talk — needs no changes at all, because it was
+  already written against the standard Web Speech API shape.
+
+Both endpoints answer 503 with a clear reason when unconfigured, the same
+"say why, not just that it failed" contract every other optional capability in
+this server follows.
 
 ### Access control — `API_TOKEN`
 
