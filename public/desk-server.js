@@ -866,6 +866,237 @@
     }
   }
 
+  /* ---------- 3D orb ----------
+   *
+   * The desk's centerpiece — `#core` — is a stack of flat CSS rings and a
+   * radial-gradient glow: `.aura`, `.glow`, `.shell`, `.scan`, `.scan2`,
+   * `.eye`. This installs a small raymarched WebGL scene over the top of it
+   * and hides those layers, replacing a flat "orb" with an actual lit,
+   * turning sphere — reactive to the same two signals the CSS version was:
+   * `--vol` (real mic/speech amplitude, already written every frame by the
+   * desk's own waveform code) and `#core.thinking` (toggled by the desk's
+   * `setThinking()`).
+   *
+   * Lives here rather than in index.html for the same reason the voice
+   * patches do: the desk is authored elsewhere and re-uploaded whole, so
+   * anything added directly to it would be lost on the next revision. This
+   * file survives that, and degrades to nothing — the original CSS orb keeps
+   * working untouched — the moment WebGL, or a shader compile, does not.
+   *
+   * `.ripple` (the sonar-ping click/activity feedback the desk appends into
+   * `#core` on demand) is left alone: it is added after the canvas, so it
+   * keeps painting on top exactly as it always has.
+   */
+
+  var ORB_VERT = [
+    'attribute vec2 aPos;',
+    'void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }',
+  ].join('\n');
+
+  // A raymarched sphere with a noise-warped surface and a fresnel rim glow.
+  // Cheap on purpose — this renders at ~230px² on every frame the tab is
+  // visible, on hardware nobody chose for this.
+  var ORB_FRAG = [
+    'precision mediump float;',
+    'uniform vec2 uRes;',
+    'uniform float uTime;',
+    'uniform float uVol;',
+    'uniform float uThink;',
+    'uniform vec3 uColorA;',
+    'uniform vec3 uColorB;',
+    '',
+    'float hash(vec3 p){ p = fract(p*0.3183099+0.1); p *= 17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }',
+    'float vnoise(vec3 x){',
+    '  vec3 i = floor(x); vec3 f = fract(x); f = f*f*(3.0-2.0*f);',
+    '  return mix(',
+    '    mix(mix(hash(i+vec3(0,0,0)),hash(i+vec3(1,0,0)),f.x), mix(hash(i+vec3(0,1,0)),hash(i+vec3(1,1,0)),f.x), f.y),',
+    '    mix(mix(hash(i+vec3(0,0,1)),hash(i+vec3(1,0,1)),f.x), mix(hash(i+vec3(0,1,1)),hash(i+vec3(1,1,1)),f.x), f.y),',
+    '    f.z);',
+    '}',
+    'float fbm(vec3 p){ float v=0.0, a=0.5; for(int i=0;i<4;i++){ v+=a*vnoise(p); p*=2.02; a*=0.5; } return v; }',
+    '',
+    'float sceneDist(vec3 p, float t){',
+    '  float r = 0.6 + 0.05*uVol;',
+    '  float n = fbm(p*3.0 + vec3(0.0,0.0,t*0.15)) - 0.5;',
+    '  return length(p) - r + n*0.06;',
+    '}',
+    '',
+    'void main(){',
+    '  vec2 uv = (gl_FragCoord.xy - 0.5*uRes) / min(uRes.x,uRes.y) * 2.0;',
+    '  vec3 ro = vec3(0.0, 0.0, 2.5);',
+    '  vec3 rd = normalize(vec3(uv, -1.7));',
+    '  float ang = uTime*0.22;',
+    '  float ca = cos(ang), sa = sin(ang);',
+    '  mat2 rot = mat2(ca, -sa, sa, ca);',
+    '  ro.xz = rot*ro.xz; rd.xz = rot*rd.xz;',
+    '',
+    '  float t = 0.0; float d = 1.0; vec3 p = ro; bool hit = false;',
+    '  for(int i=0;i<56;i++){',
+    '    p = ro + rd*t;',
+    '    d = sceneDist(p, uTime);',
+    '    if(d < 0.0015){ hit = true; break; }',
+    '    t += d*0.6;',
+    '    if(t > 6.0) break;',
+    '  }',
+    '',
+    '  vec3 base = mix(uColorA, uColorB, uThink);',
+    '  vec3 col = vec3(0.0);',
+    '  float alpha = 0.0;',
+    '',
+    '  if(hit){',
+    '    vec2 e = vec2(0.0015, 0.0);',
+    '    vec3 nrm = normalize(vec3(',
+    '      sceneDist(p+e.xyy,uTime) - sceneDist(p-e.xyy,uTime),',
+    '      sceneDist(p+e.yxy,uTime) - sceneDist(p-e.yxy,uTime),',
+    '      sceneDist(p+e.yyx,uTime) - sceneDist(p-e.yyx,uTime)',
+    '    ));',
+    '    float fres = pow(1.0 - max(dot(nrm, -rd), 0.0), 2.2);',
+    '    float light = max(dot(nrm, normalize(vec3(0.4,0.6,0.8))), 0.0);',
+    '    col = base*(0.22+0.9*light) + base*fres*1.6;',
+    '    col += base*0.15*fbm(p*4.0 - vec3(0.0,0.0,uTime*0.3));',
+    '    alpha = 1.0;',
+    '  } else {',
+    '    float b = dot(-ro, rd);',
+    '    vec3 closest = ro + rd*max(b, 0.0);',
+    '    float dist = length(closest);',
+    '    float glow = smoothstep(0.9, 0.15, dist);',
+    '    col = base * glow * (0.5+0.5*uVol) * 0.9;',
+    '    alpha = glow;',
+    '  }',
+    '',
+    '  gl_FragColor = vec4(col, alpha);',
+    '}',
+  ].join('\n');
+
+  // The desk's fixed palette (`--cyan` / `--amber` in index.html). This app
+  // has one theme, so these are read once rather than kept in sync live.
+  var ORB_COLOR_A = [0.31, 0.816, 0.902]; // cyan  — idle / live
+  var ORB_COLOR_B = [0.961, 0.769, 0.318]; // amber — thinking
+
+  function compileOrbShader(gl, type, src) {
+    var sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      gl.deleteShader(sh);
+      return null;
+    }
+    return sh;
+  }
+
+  function installOrb() {
+    try {
+      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      var core = document.getElementById('core');
+      if (!core || !window.WebGLRenderingContext) return;
+
+      var canvas = document.createElement('canvas');
+      canvas.className = 'sasrv-orb';
+      canvas.style.cssText =
+        'position:absolute;inset:-70px;width:calc(100% + 140px);height:calc(100% + 140px);pointer-events:none;';
+      var gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: false, antialias: true }) ||
+        canvas.getContext('experimental-webgl', { alpha: true, premultipliedAlpha: false, antialias: true });
+      if (!gl) return;
+
+      var vs = compileOrbShader(gl, gl.VERTEX_SHADER, ORB_VERT);
+      var fs = compileOrbShader(gl, gl.FRAGMENT_SHADER, ORB_FRAG);
+      if (!vs || !fs) return;
+
+      var program = gl.createProgram();
+      gl.attachShader(program, vs);
+      gl.attachShader(program, fs);
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return;
+      gl.useProgram(program);
+
+      var quad = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      var aPos = gl.getAttribLocation(program, 'aPos');
+      gl.enableVertexAttribArray(aPos);
+      gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+      var uRes = gl.getUniformLocation(program, 'uRes');
+      var uTime = gl.getUniformLocation(program, 'uTime');
+      var uVol = gl.getUniformLocation(program, 'uVol');
+      var uThink = gl.getUniformLocation(program, 'uThink');
+      var uColorA = gl.getUniformLocation(program, 'uColorA');
+      var uColorB = gl.getUniformLocation(program, 'uColorB');
+
+      // Everything the CSS orb drew — the static layers only; `.ripple` is
+      // appended later and is deliberately left out of this rule.
+      var style = document.createElement('style');
+      style.textContent = '#core > .aura, #core > .ring, #core > .eye { display: none; }';
+      document.head.appendChild(style);
+      core.appendChild(canvas);
+
+      var dpr = Math.min(window.devicePixelRatio || 1, 2);
+      var w = 0;
+      var h = 0;
+      function resize() {
+        var rect = canvas.getBoundingClientRect();
+        w = Math.max(1, Math.round(rect.width * dpr));
+        h = Math.max(1, Math.round(rect.height * dpr));
+        if (canvas.width !== w || canvas.height !== h) {
+          canvas.width = w;
+          canvas.height = h;
+          gl.viewport(0, 0, w, h);
+        }
+      }
+      resize();
+      window.addEventListener('resize', resize);
+
+      var thinkNow = 0; // eased, so the amber/cyan blend does not snap
+      var start = Date.now();
+      var running = true;
+
+      function volume() {
+        try {
+          var v = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--vol'));
+          return isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
+        } catch (e) {
+          return 0;
+        }
+      }
+
+      function frame() {
+        if (!running) return;
+        requestAnimationFrame(frame);
+        if (document.hidden) return; // no point painting an invisible tab
+
+        var target = core.classList.contains('thinking') ? 1 : 0;
+        thinkNow += (target - thinkNow) * 0.08;
+
+        gl.useProgram(program);
+        gl.uniform2f(uRes, w, h);
+        gl.uniform1f(uTime, (Date.now() - start) / 1000);
+        gl.uniform1f(uVol, volume());
+        gl.uniform1f(uThink, thinkNow);
+        gl.uniform3f(uColorA, ORB_COLOR_A[0], ORB_COLOR_A[1], ORB_COLOR_A[2]);
+        gl.uniform3f(uColorB, ORB_COLOR_B[0], ORB_COLOR_B[1], ORB_COLOR_B[2]);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.enable(gl.BLEND);
+        gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      }
+
+      // A context loss (GPU reset, tab backgrounded on a phone under memory
+      // pressure) otherwise freezes on the last frame forever. Falling back to
+      // the CSS orb is a better failure than a static husk.
+      canvas.addEventListener('webglcontextlost', function (e) {
+        e.preventDefault();
+        running = false;
+        style.remove();
+        canvas.remove();
+      });
+
+      requestAnimationFrame(frame);
+    } catch (e) {
+      /* WebGL misbehaved somewhere in here — the CSS orb is still there */
+    }
+  }
+
   /* ---------- genome bridge ---------- */
 
   // Read straight from localStorage rather than the engine's closure: the desk
@@ -1450,6 +1681,13 @@
   loadVoiceMode();
   installVoice();
   installIntent();
+
+  // Unlike the two patches above, this one needs `#core` to actually exist —
+  // this script is loaded `defer`, so the document is already fully parsed by
+  // the time this runs, but the check costs nothing and means a future change
+  // to how this file is loaded fails safe instead of silently.
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', installOrb);
+  else installOrb();
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();

@@ -308,6 +308,23 @@ Both endpoints answer 503 with a clear reason when unconfigured, the same
 "say why, not just that it failed" contract every other optional capability in
 this server follows.
 
+### A real orb, not a flat one
+
+`#core` — the desk's centerpiece — used to be a stack of flat CSS rings and a
+radial-gradient glow. `desk-server.js` now overlays it with a small raymarched
+WebGL scene: an actual lit, turning sphere with a noise-warped surface and a
+fresnel rim glow, driven by the same two signals the CSS version read —
+`--vol` (real mic/speech amplitude) and `#core.thinking` — so it still breathes
+with the microphone and still shifts cyan → amber while the desk is thinking.
+No library, no build step: it's a hand-written vertex/fragment shader pair,
+consistent with this repo's one dependency (`express`).
+
+It degrades to nothing rather than to something broken: no WebGL, a shader
+that fails to compile, `prefers-reduced-motion`, or a lost GPU context all
+leave the original CSS orb exactly as it was. Lives in `desk-server.js` rather
+than `index.html` for the same reason the voice patches do — the desk is
+authored elsewhere and re-uploaded whole, and this file is what survives that.
+
 ### Access control — `API_TOKEN`
 
 Off by default, because on loopback it buys nothing. Set it before this binds
