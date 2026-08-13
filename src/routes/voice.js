@@ -7,10 +7,52 @@
 import { Router } from 'express';
 import { briefFor, briefStream } from '../lib/voiceBrief.js';
 import { resolveIntent } from '../lib/intent.js';
+import { speak } from '../lib/tts.js';
+import { ttsConfigured } from '../config.js';
 import { rateLimit } from '../lib/rateLimit.js';
 import { log } from '../lib/log.js';
 
 export const voiceRouter = Router();
+
+// A sentence in, a sound out.
+//
+// This exists because the browser's own synthesiser cannot be relied on: with
+// no voices installed it produces nothing, silently, and no client-side code
+// can change that. Audio the browser merely has to play always works.
+//
+// 503 when there is no service, which is the signal to use the browser instead
+// — an unconfigured desk is not a broken one.
+voiceRouter.post('/voice/speak', rateLimit({ name: 'speak', max: 60 }), async (req, res) => {
+  const text = String(req.body?.text || '').trim();
+  if (!text) return res.status(400).json({ ok: false, error: 'text required' });
+  if (!ttsConfigured()) {
+    return res.status(503).json({ ok: false, error: 'no speech service configured (set TTS_BASE)' });
+  }
+
+  // The listener closing the tab or talking over the desk should stop the
+  // generation, not just discard it.
+  const controller = new AbortController();
+  res.on('close', () => {
+    if (!res.writableEnded) controller.abort();
+  });
+
+  const spoken = await speak(text, {
+    instruct: req.body?.instruct,
+    voice: req.body?.voice,
+    signal: controller.signal,
+  });
+
+  if (res.writableEnded) return undefined;
+  if (!spoken) {
+    // Deliberately not an error: the caller's next move is the same either way,
+    // which is to read it in the browser's voice.
+    return res.status(503).json({ ok: false, error: 'speech service did not answer with audio' });
+  }
+
+  res.set('Content-Type', spoken.type);
+  res.set('Cache-Control', 'no-store');
+  return res.send(spoken.audio);
+});
 
 voiceRouter.post('/voice/brief', rateLimit({ name: 'voice', max: 60 }), async (req, res) => {
   const text = String(req.body?.text || '').trim();

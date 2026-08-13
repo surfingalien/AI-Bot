@@ -465,6 +465,82 @@ check('the tab row scrolls rather than running off the edge', fit.tabsScrollable
 check('and the launcher is clear of the composer', fit.launcherOverlapsComposer === false);
 await phone.close();
 
+console.log('\n  speech from the server, not from this browser');
+// The condition no client-side fix can reach: a browser with no voices. This
+// Chromium is exactly that, so the audio path is the only one that can make it
+// speak — and it is checked here by pointing the desk at a stubbed service
+// rather than by reconfiguring the server, so every check above keeps measuring
+// the browser path it was written for.
+const audioPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+let speakCalls = 0;
+await audioPage.route('**/api/config', async (route) => {
+  const res = await route.fetch();
+  const json = await res.json();
+  json.voice = { ...(json.voice || {}), speech: true };
+  await route.fulfill({ response: res, json });
+});
+await audioPage.route('**/api/voice/speak', async (route) => {
+  speakCalls += 1;
+  // A 44-byte WAV header and a little silence — enough to be audio.
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + 480, 4);
+  header.write('WAVEfmt ', 8);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(24000, 24);
+  header.writeUInt32LE(48000, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(480, 40);
+  await route.fulfill({
+    status: 200,
+    contentType: 'audio/wav',
+    body: Buffer.concat([header, Buffer.alloc(480)]),
+  });
+});
+await audioPage.addInitScript(() => {
+  window.__played = 0;
+  window.__synth = 0;
+  const play = HTMLMediaElement.prototype.play;
+  HTMLMediaElement.prototype.play = function () {
+    window.__played += 1;
+    return play.apply(this, arguments);
+  };
+  const wait = setInterval(() => {
+    if (window.speechSynthesis && !window.__hooked) {
+      window.__hooked = true;
+      const real = window.speechSynthesis.speak.bind(window.speechSynthesis);
+      window.speechSynthesis.speak = (u) => {
+        if (u && u.text && u.text.trim()) window.__synth += 1;
+        return real(u);
+      };
+      clearInterval(wait);
+    }
+  }, 5);
+});
+await audioPage.goto(`${BASE}/?token=${TOKEN}`, { waitUntil: 'networkidle' });
+await audioPage.evaluate(() => document.querySelector('.enterbtn')?.click());
+await audioPage.waitForTimeout(1800);
+
+const synthBefore = await audioPage.evaluate(() => window.__synth);
+await audioPage.evaluate(() =>
+  window.speechSynthesis.speak(new SpeechSynthesisUtterance('The position is unchanged today.')),
+);
+await audioPage.waitForTimeout(2500);
+const heard = await audioPage.evaluate(() => ({ played: window.__played, synth: window.__synth }));
+
+check('the desk asks the server for audio', speakCalls >= 1, `${speakCalls} request(s)`);
+check('and plays it rather than reading it itself', heard.played >= 1, `${heard.played} playback(s)`);
+check(
+  'so this browser’s empty voice list stops mattering',
+  heard.synth === synthBefore,
+  `${heard.synth - synthBefore} browser utterance(s)`,
+);
+await audioPage.close();
+
 console.log('\n  settings that stay saved');
 // Opening the settings panel used to empty it: the button calls openPop() with
 // no argument, and the fill only ran when that argument was truthy. SAVE then

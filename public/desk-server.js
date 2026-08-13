@@ -15,6 +15,9 @@
   var API = '';
   var open = false;
   var menuOpen = false;
+  // Whether the server has a speech service to ask. Set from /api/config, so
+  // a desk whose server has none keeps using the browser exactly as before.
+  var serverSpeech = false;
   // How long the first utterance waits for the browser's voice list. Long
   // enough for a cold list to arrive, short enough that a browser which has no
   // voices at all is not a hang.
@@ -355,7 +358,112 @@
     return undefined;
   }
 
+  /*
+   * Audio from the server, when there is a service to ask.
+   *
+   * Everything above decides what to say; this decides what says it. The
+   * browser's synthesiser is free and instant and, on a machine with no voices
+   * installed, produces nothing at all — silently, with no error, and with no
+   * client-side remedy. A sound file has no such failure: playing one is the
+   * one thing every browser can do.
+   *
+   * `speechSynthesis` keeps its own queue, so handing it sentences in order
+   * sounds continuous. Audio elements have no queue at all — played as they
+   * arrive they would overlap, and a brief read over itself is worse than one
+   * read plainly. Hence the queue below.
+   */
+  var audioQueue = [];
+  var audioNow = null;
+
+  function stopAudio() {
+    audioQueue.length = 0;
+    if (!audioNow) return;
+    try {
+      audioNow.pause();
+      if (audioNow.src) URL.revokeObjectURL(audioNow.src);
+    } catch (e) {
+      /* already finished */
+    }
+    audioNow = null;
+  }
+
+  function playNext() {
+    if (audioNow || !audioQueue.length) return;
+    var next = audioQueue.shift();
+    try {
+      var el = new Audio(next.url);
+      audioNow = el;
+      var done = function () {
+        try {
+          URL.revokeObjectURL(next.url);
+        } catch (e) {
+          /* already released */
+        }
+        if (audioNow === el) audioNow = null;
+        playNext();
+      };
+      el.onended = done;
+      el.onerror = function () {
+        lastSpeechError = 'the audio from the speech service would not play';
+        renderVoice();
+        done();
+      };
+      var started = el.play();
+      // Autoplay policy rejects this when nothing has been tapped yet. The
+      // browser's own synthesiser is under the same rule, so there is nothing
+      // to fall back to — but there is something to say about it.
+      if (started && started.catch) {
+        started.catch(function (err) {
+          lastSpeechError = (err && err.message) || 'the browser blocked audio playback';
+          renderVoice();
+          done();
+        });
+      }
+    } catch (e) {
+      audioNow = null;
+      playNext();
+    }
+  }
+
+  /** Ask the server to say it. Falls back to the browser on anything at all. */
+  function speakOnServer(script, ticket, fallback) {
+    fetch(API + '/api/voice/speak', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'audio/wav' },
+      body: JSON.stringify({ text: script }),
+    })
+      .then(function (r) {
+        // 503 is the documented "no service, use your own voice" answer, not a
+        // fault. Anything else that is not audio is treated the same way.
+        var type = r.headers.get('content-type') || '';
+        if (!r.ok || type.indexOf('audio/') !== 0) throw new Error('no audio');
+        return r.blob();
+      })
+      .then(function (blob) {
+        // Superseded while it was being generated — the operator has started
+        // talking, or a newer answer has arrived.
+        if (ticket !== speakSeq) return;
+        audioQueue.push({ url: URL.createObjectURL(blob) });
+        playNext();
+      })
+      .catch(function () {
+        if (ticket !== speakSeq) return;
+        fallback();
+      });
+  }
+
   function utter(script, source, original) {
+    if (serverSpeech) {
+      var ticket = speakSeq;
+      speakOnServer(script, ticket, function () {
+        utterLocally(script, source, original);
+      });
+      return;
+    }
+    utterLocally(script, source, original);
+  }
+
+  function utterLocally(script, source, original) {
     whenVoicesReady(function () {
       try {
         // A no-op unless something left it paused, which is the case that
@@ -465,6 +573,10 @@
       // over them.
       function bargeIn() {
         speakSeq++;
+        // Both deliveries, because either could be mid-sentence and only one of
+        // them is the browser's. Stopping the synthesiser while a downloaded
+        // brief kept playing would be barge-in that does not.
+        stopAudio();
         try {
           window.speechSynthesis.cancel();
         } catch (e) {
@@ -628,12 +740,22 @@
    * only one of them is fixable in this codebase.
    */
   function voiceStatus() {
+    // With a service behind it none of the browser's limitations apply: the
+    // sound arrives as a file and the browser only has to play it.
+    if (serverSpeech) {
+      if (lastSpeechError) {
+        return 'The speech service answered, but playback failed (' + lastSpeechError + ').';
+      }
+      if (lastScript) return '“' + lastScript.text + '” — ' + lastScript.source + ', spoken by the server';
+      return 'Nothing spoken yet. Speech comes from the server, so this browser’s voices do not matter.';
+    }
     if (!('speechSynthesis' in window)) {
-      return 'This browser has no speech synthesis, so nothing here can be read aloud.';
+      return 'This browser has no speech synthesis, so nothing here can be read aloud. ' +
+        'Set TTS_BASE on the server to have it synthesise instead.';
     }
     if (voicesReady && voiceCount() === 0) {
-      return 'No voices are installed in this browser, so nothing can be spoken aloud. ' +
-        'The desk is still writing every answer to the log.';
+      return 'No voices are installed in this browser, so nothing can be spoken aloud here. ' +
+        'Set TTS_BASE on the server and it will synthesise the audio instead.';
     }
     if (lastSpeechError) {
       return 'The browser refused the last thing the desk tried to say (' + lastSpeechError + ').';
@@ -1181,6 +1303,11 @@
   function mount(cfg) {
     if (mounted) return;
     mounted = true;
+
+    // A server that can synthesise speech makes the browser's own voices
+    // irrelevant, which is the difference between working and silent on a
+    // machine that has none.
+    serverSpeech = Boolean(cfg && cfg.voice && cfg.voice.speech);
 
     var style = el('style');
     style.textContent = CSS;
