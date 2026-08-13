@@ -15,6 +15,10 @@
   var API = '';
   var open = false;
   var menuOpen = false;
+  // How long the first utterance waits for the browser's voice list. Long
+  // enough for a cold list to arrive, short enough that a browser which has no
+  // voices at all is not a hang.
+  var VOICES_WAIT_MS = 1500;
   var timer = null;
   var mounted = false;
 
@@ -293,19 +297,101 @@
       });
   }
 
-  function utter(script, source, original) {
+  /*
+   * Getting a correct utterance as far as a speaker.
+   *
+   * Everything above this decides *what* to say, and all of it can be right
+   * while nothing is heard. Three things swallow speech in browsers, none of
+   * them visible to the code that asked for it:
+   *
+   *  - Voices load asynchronously. Speaking before the list is populated is
+   *    dropped outright in some builds, and the first thing the desk says is
+   *    always the most likely to be early.
+   *  - The synthesiser can be left paused — by a tab switch, or by the browser
+   *    itself. It stays paused, silently, until something resumes it.
+   *  - An utterance nothing holds a reference to can be collected while it is
+   *    still being read, which truncates it or loses it entirely.
+   *
+   * And underneath all three: `speak()` reports failure nowhere, so a desk that
+   * cannot talk looks exactly like a desk with nothing to say. The error is now
+   * kept and shown, because "it is silent" is not a diagnosis.
+   */
+
+  // Held only until each finishes. This array is the reference that stops the
+  // browser collecting an utterance mid-sentence.
+  var speaking = [];
+  var lastSpeechError = null;
+  var voicesReady = false;
+
+  function voiceCount() {
     try {
-      var u = new SpeechSynthesisUtterance(script);
-      // A briefing reads a touch slower than a data dump; keep whatever the
-      // desk asked for otherwise.
-      u.rate = source && source.rate ? source.rate : 1;
-      u.pitch = source && source.pitch ? source.pitch : 1;
-      if (source && source.voice) u.voice = source.voice;
-      if (source && source.lang) u.lang = source.lang;
-      original(u);
+      return (window.speechSynthesis.getVoices() || []).length;
     } catch (e) {
-      /* synthesis unavailable */
+      return 0;
     }
+  }
+
+  /** Run once the voice list exists — or once it is clear it never will. */
+  function whenVoicesReady(run) {
+    if (voicesReady || voiceCount()) {
+      voicesReady = true;
+      return run();
+    }
+    var done = false;
+    var go = function () {
+      if (done) return;
+      done = true;
+      voicesReady = true;
+      run();
+    };
+    try {
+      window.speechSynthesis.addEventListener('voiceschanged', go, { once: true });
+    } catch (e) {
+      /* older synthesiser: the timeout below is the only path */
+    }
+    // A browser with no voices at all never fires that event, and waiting
+    // forever for one would be a worse failure than speaking into a void.
+    setTimeout(go, VOICES_WAIT_MS);
+    return undefined;
+  }
+
+  function utter(script, source, original) {
+    whenVoicesReady(function () {
+      try {
+        // A no-op unless something left it paused, which is the case that
+        // otherwise never recovers on its own.
+        try {
+          if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+        } catch (e) {
+          /* nothing to resume */
+        }
+
+        var u = new SpeechSynthesisUtterance(script);
+        // A briefing reads a touch slower than a data dump; keep whatever the
+        // desk asked for otherwise.
+        u.rate = source && source.rate ? source.rate : 1;
+        u.pitch = source && source.pitch ? source.pitch : 1;
+        if (source && source.voice) u.voice = source.voice;
+        if (source && source.lang) u.lang = source.lang;
+
+        var release = function (ev) {
+          if (ev && ev.error) {
+            lastSpeechError = String(ev.error);
+            renderVoice();
+          }
+          var at = speaking.indexOf(u);
+          if (at !== -1) speaking.splice(at, 1);
+        };
+        u.onend = release;
+        u.onerror = release;
+
+        speaking.push(u);
+        original(u);
+      } catch (e) {
+        lastSpeechError = (e && e.message) || String(e);
+        renderVoice();
+      }
+    });
   }
 
   /* ---------- voice in ----------
@@ -532,6 +618,30 @@
     window.webkitSpeechRecognition = Wrapped;
   }
 
+  /*
+   * Why the desk is or is not talking, in one line.
+   *
+   * Silence had exactly one explanation here before — "SPEAK is probably off" —
+   * and it was wrong at least as often as it was right. A browser with no
+   * voices installed, a synthesiser that refused, and a desk working perfectly
+   * with the switch off are three different problems with the same symptom, and
+   * only one of them is fixable in this codebase.
+   */
+  function voiceStatus() {
+    if (!('speechSynthesis' in window)) {
+      return 'This browser has no speech synthesis, so nothing here can be read aloud.';
+    }
+    if (voicesReady && voiceCount() === 0) {
+      return 'No voices are installed in this browser, so nothing can be spoken aloud. ' +
+        'The desk is still writing every answer to the log.';
+    }
+    if (lastSpeechError) {
+      return 'The browser refused the last thing the desk tried to say (' + lastSpeechError + ').';
+    }
+    if (lastScript) return '“' + lastScript.text + '” — ' + lastScript.source;
+    return 'Nothing spoken yet. The desk reads answers aloud when SPEAK is on in its settings.';
+  }
+
   function renderVoice() {
     if (!refs.voiceMode) return;
     refs.voiceMode.textContent = voiceMode === 'brief' ? 'BRIEFING' : 'VERBATIM';
@@ -540,11 +650,7 @@
       refs.intentMode.textContent = intentMode ? 'INTENT ON' : 'INTENT OFF';
       refs.intentMode.className = 'sasrv-go' + (intentMode ? '' : ' gh');
     }
-    if (refs.voiceLast) {
-      refs.voiceLast.textContent = lastScript
-        ? '“' + lastScript.text + '” — ' + lastScript.source
-        : 'Nothing spoken yet. The desk speaks when SPEAK is on in its settings.';
-    }
+    if (refs.voiceLast) refs.voiceLast.textContent = voiceStatus();
     if (refs.intentLast) {
       refs.intentLast.textContent = lastIntent
         ? lastIntent.rewritten

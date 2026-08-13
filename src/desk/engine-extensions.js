@@ -633,6 +633,11 @@
   function primeSpeech() {
     try {
       if (!('speechSynthesis' in window)) return;
+      // A synthesiser left paused — by a previous tab, or by the browser —
+      // stays paused silently through every later request to speak. Resuming
+      // is a no-op when it is not, and the only recovery when it is.
+      if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+
       var u = new SpeechSynthesisUtterance(' ');
       u.volume = 0;
       u.__saPrime = true; // the server panel's patch lets this one straight through

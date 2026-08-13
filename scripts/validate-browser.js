@@ -233,6 +233,19 @@ check(
   (spoken[0] || '').slice(0, 80),
 );
 
+// This Chromium ships no speech engine at all, which is the one condition no
+// change in this repo can fix — so the desk has to say so rather than looking
+// like it has nothing to report. The environment's limitation is the test.
+const voiceNote = await page.evaluate(() => {
+  const notes = [...document.querySelectorAll('.sasrv-note')].map((n) => n.innerText);
+  return notes.find((t) => /voice|spoken|speech/i.test(t)) || '';
+});
+check(
+  'and a browser with no voices is told so, not left guessing',
+  /no voices are installed/i.test(voiceNote),
+  voiceNote.slice(0, 70),
+);
+
 console.log('\n  waking up');
 // The wake line reports what the server did while the tab was shut, so it can
 // only come from the server — the browser has no way to know it.
