@@ -152,6 +152,36 @@ export const config = {
     brainTimeoutMs: int(env.VOICE_BRAIN_TIMEOUT_MS, 8000),
   },
 
+  // Speech synthesised on the server rather than in the browser.
+  //
+  // The browser's own synthesiser is free and instant, and on a machine with no
+  // voices installed it produces nothing at all — silently, with no error and
+  // nothing any amount of client-side code can do about it. A service that
+  // returns audio bytes has no such failure: the browser only has to play a
+  // sound, which it can always do.
+  //
+  // Unset means the desk keeps using the browser, which is the right default:
+  // this costs a GPU somewhere.
+  tts: {
+    // An OmniVoice-compatible service — POST {text, instruct} -> audio bytes.
+    // `services/omnivoice` in this repo is one, because upstream ships a
+    // Python API and a Gradio demo but nothing to point a URL at.
+    base: (env.TTS_BASE || '').replace(/\/+$/, ''),
+    key: env.TTS_KEY || '',
+    // Voice design attributes: "female, low pitch, british accent". Ignored by
+    // backends that do not understand them.
+    instruct: env.TTS_INSTRUCT || '',
+    // A saved voice-clone prompt on the service, if it has one.
+    voice: env.TTS_VOICE || '',
+    // Generation is not instant even on a fast card, and a brief nobody hears
+    // is worth less than a brief the browser reads badly. Past this the desk
+    // falls back to its own synthesiser.
+    timeoutMs: int(env.TTS_TIMEOUT_MS, 12000),
+    // Bigger than any sentence, small enough that a runaway response cannot
+    // exhaust memory.
+    maxBytes: int(env.TTS_MAX_BYTES, 8 * 1024 * 1024),
+  },
+
   booking: {
     // Voice booking. Unset means the capability is absent, and /api/book says
     // so out loud rather than 404ing — the desk degrades to a call script
@@ -181,6 +211,10 @@ export function authRequired() {
 
 export function brainConfigured() {
   return Boolean(config.brain.base);
+}
+
+export function ttsConfigured() {
+  return Boolean(config.tts.base);
 }
 
 export function bookingConfigured() {

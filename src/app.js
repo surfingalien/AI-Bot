@@ -1,6 +1,6 @@
 import express from 'express';
 import path from 'node:path';
-import { config, brainConfigured, authRequired, bookingConfigured } from './config.js';
+import { config, brainConfigured, authRequired, bookingConfigured, ttsConfigured } from './config.js';
 import { authMiddleware } from './lib/auth.js';
 import { renderIndex } from './ui.js';
 import { fetchRouter } from './routes/fetch.js';
@@ -112,7 +112,10 @@ export function createApp() {
       },
       egress: { privateAllowed: config.fetch.allowPrivateEgress },
       auth: { required: authRequired() },
-      voice: { alerts: config.notify.voice },
+      // `speech` tells the desk whether to ask the server for audio or use the
+      // browser's own synthesiser. It is the difference between working and
+      // silent on a machine with no voices installed.
+      voice: { alerts: config.notify.voice, speech: ttsConfigured() },
       email: { configured: emailConfigured() },
       booking: { configured: bookingConfigured(), provider: config.booking.provider },
       analysis: { persona: config.analysis.persona },
