@@ -68,6 +68,15 @@ export const config = {
   market: {
     // Overridable for a mirror, an offline replay, or a test stub.
     base: (env.YAHOO_BASE || 'https://query1.finance.yahoo.com').replace(/\/+$/, ''),
+    // Where the session cookie the crumb is bound to comes from. A real quote
+    // page rather than `fc.yahoo.com`: the latter is the older trick and hands
+    // back nothing in regions where Yahoo answers with a consent interstitial
+    // instead. Overridable so tests can stand a stub in front of it.
+    crumbSeedUrl: env.YAHOO_CRUMB_SEED_URL || 'https://finance.yahoo.com/quote/AAPL',
+    // The consent interstitial bounces through guce.yahoo.com and back, setting
+    // a cookie on each hop. Bounded because a redirect loop must not become an
+    // unbounded crawl.
+    crumbMaxHops: int(env.YAHOO_CRUMB_MAX_HOPS, 5),
     chartRange: env.YAHOO_CHART_RANGE || '2y',
     chartInterval: env.YAHOO_CHART_INTERVAL || '1d',
     cacheMs: int(env.MARKET_CACHE_MS, 60000),

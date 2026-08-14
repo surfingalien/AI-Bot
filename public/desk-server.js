@@ -893,85 +893,149 @@
     'void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }',
   ].join('\n');
 
-  // A raymarched sphere with a noise-warped surface and a fresnel rim glow.
-  // Cheap on purpose — this renders at ~230px² on every frame the tab is
-  // visible, on hardware nobody chose for this.
+  // A raymarched glass sphere: soft wrap lighting, a Blinn-Phong specular
+  // sheen, a low-amplitude ripple instead of a cratered surface, a
+  // photographic (exponential) bloom, and a scattering of soft round motes —
+  // not the confetti-shard version this replaced. Cheap on purpose — this
+  // renders at ~230px² on every frame the tab is visible, on hardware nobody
+  // chose for this.
   var ORB_FRAG = [
+    // This desk is meant to run for hours (the autonomy loop is the whole
+    // point), and every periodic thing in this shader — rotation, surface
+    // drift, the mote field — is driven by uTime, seconds-since-mount, which
+    // never resets. mediump alone visibly stutters once that climbs into the
+    // thousands; highp fixes it and the guard is the standard way to ask for
+    // it without failing to compile on the (rare, fragment-stage-only)
+    // hardware that has none.
+    '#ifdef GL_FRAGMENT_PRECISION_HIGH',
+    'precision highp float;',
+    '#else',
     'precision mediump float;',
+    '#endif',
     'uniform vec2 uRes;',
     'uniform float uTime;',
     'uniform float uVol;',
     'uniform float uThink;',
     'uniform vec3 uColorA;',
     'uniform vec3 uColorB;',
+    'uniform vec3 uColorC;',
     '',
-    'float hash(vec3 p){ p = fract(p*0.3183099+0.1); p *= 17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }',
+    'float hash1(vec3 p){ p = fract(p*0.3183099+0.1); p *= 17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }',
+    'vec3 hash3(vec3 p){',
+    '  return vec3(hash1(p+vec3(11.1,0.0,0.0)), hash1(p+vec3(0.0,37.3,0.0)), hash1(p+vec3(0.0,0.0,71.7)));',
+    '}',
     'float vnoise(vec3 x){',
     '  vec3 i = floor(x); vec3 f = fract(x); f = f*f*(3.0-2.0*f);',
     '  return mix(',
-    '    mix(mix(hash(i+vec3(0,0,0)),hash(i+vec3(1,0,0)),f.x), mix(hash(i+vec3(0,1,0)),hash(i+vec3(1,1,0)),f.x), f.y),',
-    '    mix(mix(hash(i+vec3(0,0,1)),hash(i+vec3(1,0,1)),f.x), mix(hash(i+vec3(0,1,1)),hash(i+vec3(1,1,1)),f.x), f.y),',
+    '    mix(mix(hash1(i+vec3(0,0,0)),hash1(i+vec3(1,0,0)),f.x), mix(hash1(i+vec3(0,1,0)),hash1(i+vec3(1,1,0)),f.x), f.y),',
+    '    mix(mix(hash1(i+vec3(0,0,1)),hash1(i+vec3(1,0,1)),f.x), mix(hash1(i+vec3(0,1,1)),hash1(i+vec3(1,1,1)),f.x), f.y),',
     '    f.z);',
     '}',
-    'float fbm(vec3 p){ float v=0.0, a=0.5; for(int i=0;i<4;i++){ v+=a*vnoise(p); p*=2.02; a*=0.5; } return v; }',
+    // Three octaves at low amplitude — a liquid ripple, not a crater field.
+    'float fbm(vec3 p){ float v=0.0, a=0.5; for(int i=0;i<3;i++){ v+=a*vnoise(p); p*=2.1; a*=0.5; } return v; }',
     '',
     'float sceneDist(vec3 p, float t){',
-    '  float r = 0.6 + 0.05*uVol;',
-    '  float n = fbm(p*3.0 + vec3(0.0,0.0,t*0.15)) - 0.5;',
-    '  return length(p) - r + n*0.06;',
+    // A slow idle breath even in total silence, plus a volume-driven swell —
+    // the same two-part motion the original CSS breathe2 keyframe had.
+    '  float r = 0.6 + 0.018*sin(t*0.42) + 0.035*uVol;',
+    // Thinking turns the surface visibly more turbulent, not just a different
+    // color — the ripple runs faster and cuts a little deeper.
+    '  float speed = 0.10 + 0.16*uThink;',
+    '  float amp = 0.014 + 0.01*uThink;',
+    '  float n = fbm(p*1.7 + vec3(0.0,0.0,t*speed)) - 0.5;',
+    '  return length(p) - r + n*amp;',
     '}',
     '',
     'void main(){',
     '  vec2 uv = (gl_FragCoord.xy - 0.5*uRes) / min(uRes.x,uRes.y) * 2.0;',
     '  vec3 ro = vec3(0.0, 0.0, 2.5);',
     '  vec3 rd = normalize(vec3(uv, -1.7));',
-    '  float ang = uTime*0.22;',
+    '  float ang = uTime*0.16;',
     '  float ca = cos(ang), sa = sin(ang);',
     '  mat2 rot = mat2(ca, -sa, sa, ca);',
     '  ro.xz = rot*ro.xz; rd.xz = rot*rd.xz;',
     '',
     '  float t = 0.0; float d = 1.0; vec3 p = ro; bool hit = false;',
-    '  for(int i=0;i<56;i++){',
+    '  for(int i=0;i<64;i++){',
     '    p = ro + rd*t;',
     '    d = sceneDist(p, uTime);',
-    '    if(d < 0.0015){ hit = true; break; }',
-    '    t += d*0.6;',
+    '    if(d < 0.0012){ hit = true; break; }',
+    '    t += d*0.7;',
     '    if(t > 6.0) break;',
     '  }',
     '',
     '  vec3 base = mix(uColorA, uColorB, uThink);',
     '  vec3 col = vec3(0.0);',
     '  float alpha = 0.0;',
+    '  vec3 lightDir = normalize(vec3(0.45, 0.65, 0.75));',
     '',
     '  if(hit){',
-    '    vec2 e = vec2(0.0015, 0.0);',
+    '    vec2 e = vec2(0.0018, 0.0);',
     '    vec3 nrm = normalize(vec3(',
     '      sceneDist(p+e.xyy,uTime) - sceneDist(p-e.xyy,uTime),',
     '      sceneDist(p+e.yxy,uTime) - sceneDist(p-e.yxy,uTime),',
     '      sceneDist(p+e.yyx,uTime) - sceneDist(p-e.yyx,uTime)',
     '    ));',
-    '    float fres = pow(1.0 - max(dot(nrm, -rd), 0.0), 2.2);',
-    '    float light = max(dot(nrm, normalize(vec3(0.4,0.6,0.8))), 0.0);',
-    '    col = base*(0.22+0.9*light) + base*fres*1.6;',
-    '    col += base*0.15*fbm(p*4.0 - vec3(0.0,0.0,uTime*0.3));',
+    '',
+    // A slow aurora drift folded into the base color by the normal and a
+    // low-frequency time field — a second hue moving across the surface,
+    // not a flat single-tone ball.
+    '    float driftField = fbm(nrm*1.4 + vec3(0.0,0.0,uTime*0.06));',
+    '    float tone = smoothstep(0.25, 0.75, nrm.y*0.5 + 0.5 + (driftField-0.5)*0.6);',
+    '    vec3 tinted = mix(base, uColorC, tone*0.30);',
+    '',
+    '    float diff = max(dot(nrm, lightDir), 0.0);',
+    // Wrap lighting — diffuse never fully drops to black, the way light
+    // passing through a translucent shell behaves rather than a matte solid.
+    '    float wrap = diff*0.5 + 0.5;',
+    '    vec3 halfV = normalize(lightDir - rd);',
+    '    float spec = pow(max(dot(nrm, halfV), 0.0), 60.0);',
+    '    float fres = pow(1.0 - max(dot(nrm, -rd), 0.0), 2.4);',
+    '',
+    '    col = tinted * (0.30 + 0.55*wrap);',
+    '    col += tinted * fres * (1.3 + 0.7*uVol);',
+    '    col += vec3(1.0) * spec * 1.1;',
     '    alpha = 1.0;',
     '  } else {',
     '    float b = dot(-ro, rd);',
     '    vec3 closest = ro + rd*max(b, 0.0);',
     '    float dist = length(closest);',
-    '    float glow = smoothstep(0.9, 0.15, dist);',
-    '    col = base * glow * (0.5+0.5*uVol) * 0.9;',
+    // Exponential falloff reads as a photographic bloom rather than the hard
+    // ring a smoothstep glow gives.
+    '    float glow = exp(-pow(max(dist-0.58, 0.0)*2.6, 1.7));',
+    '    col = base * glow * (0.55+0.55*uVol) * 0.85;',
     '    alpha = glow;',
+    '',
+    // Soft round motes: a jittered feature point per cell (a one-neighbor
+    // Worley) with a gaussian falloff — floating light, not the quantized
+    // confetti shards a raw per-cell threshold gives.
+    '    vec3 driftP = closest + vec3(0.0, 0.0, uTime*0.035);',
+    '    float freq = 3.6;',
+    '    vec3 cell = floor(driftP * freq);',
+    '    float on = step(0.82, hash1(cell + 4.7));',
+    '    vec3 jitter = hash3(cell);',
+    '    vec3 featurePoint = (cell + jitter) / freq;',
+    '    float dFeat = length(driftP - featurePoint);',
+    '    float twinkle = 0.5 + 0.5*sin(uTime*1.8 + dot(cell, vec3(12.9898,78.233,45.164)));',
+    '    float mote = on * smoothstep(0.085, 0.0, dFeat) * (0.45+0.55*twinkle);',
+    '    float shell = smoothstep(1.05, 0.60, dist) * smoothstep(0.56, 0.85, dist);',
+    '    mote *= shell;',
+    '    mote *= 0.5 + 1.0*uVol;',
+    '    vec3 moteColor = mix(base, vec3(1.0), 0.5);',
+    '    col += moteColor * mote * 1.3;',
+    '    alpha = max(alpha, min(mote*1.3, 1.0));',
     '  }',
     '',
-    '  gl_FragColor = vec4(col, alpha);',
+    '  gl_FragColor = vec4(col, clamp(alpha, 0.0, 1.0));',
     '}',
   ].join('\n');
 
-  // The desk's fixed palette (`--cyan` / `--amber` in index.html). This app
-  // has one theme, so these are read once rather than kept in sync live.
-  var ORB_COLOR_A = [0.31, 0.816, 0.902]; // cyan  — idle / live
-  var ORB_COLOR_B = [0.961, 0.769, 0.318]; // amber — thinking
+  // The desk's fixed palette (`--cyan` / `--amber` / `--violet` in
+  // index.html). This app has one theme, so these are read once rather than
+  // kept in sync live.
+  var ORB_COLOR_A = [0.31, 0.816, 0.902]; // cyan   — idle / live
+  var ORB_COLOR_B = [0.961, 0.769, 0.318]; // amber  — thinking
+  var ORB_COLOR_C = [0.604, 0.655, 1.0]; // violet — aurora accent
 
   function compileOrbShader(gl, type, src) {
     var sh = gl.createShader(type);
@@ -1022,6 +1086,7 @@
       var uThink = gl.getUniformLocation(program, 'uThink');
       var uColorA = gl.getUniformLocation(program, 'uColorA');
       var uColorB = gl.getUniformLocation(program, 'uColorB');
+      var uColorC = gl.getUniformLocation(program, 'uColorC');
 
       // Everything the CSS orb drew — the static layers only; `.ripple` is
       // appended later and is deliberately left out of this rule.
@@ -1074,6 +1139,7 @@
         gl.uniform1f(uThink, thinkNow);
         gl.uniform3f(uColorA, ORB_COLOR_A[0], ORB_COLOR_A[1], ORB_COLOR_A[2]);
         gl.uniform3f(uColorB, ORB_COLOR_B[0], ORB_COLOR_B[1], ORB_COLOR_B[2]);
+        gl.uniform3f(uColorC, ORB_COLOR_C[0], ORB_COLOR_C[1], ORB_COLOR_C[2]);
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT);
         gl.enable(gl.BLEND);
