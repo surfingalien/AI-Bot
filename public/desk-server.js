@@ -899,7 +899,19 @@
   var ORB_FRAG = [
     'precision mediump float;',
     'uniform vec2 uRes;',
+    // This desk is meant to run for hours (the autonomy loop is the whole
+    // point). uTime is seconds-since-mount and never resets, and every
+    // periodic thing in this shader — rotation, surface drift, the sparkle
+    // field — reads it directly; under mediump alone it would visibly stutter
+    // once the value climbed into the thousands. highp costs nothing where
+    // it exists, and the guard is the standard way to ask for it without
+    // failing to compile on the (rare, and fragment-stage only) hardware
+    // that has none.
+    '#ifdef GL_FRAGMENT_PRECISION_HIGH',
+    'uniform highp float uTime;',
+    '#else',
     'uniform float uTime;',
+    '#endif',
     'uniform float uVol;',
     'uniform float uThink;',
     'uniform vec3 uColorA;',
@@ -917,8 +929,12 @@
     '',
     'float sceneDist(vec3 p, float t){',
     '  float r = 0.6 + 0.05*uVol;',
-    '  float n = fbm(p*3.0 + vec3(0.0,0.0,t*0.15)) - 0.5;',
-    '  return length(p) - r + n*0.06;',
+    // Thinking turns the surface visibly more turbulent, not just a different
+    // color — the noise field runs faster and cuts deeper.
+    '  float speed = 0.15 + 0.22*uThink;',
+    '  float amp = 0.06 + 0.03*uThink;',
+    '  float n = fbm(p*3.0 + vec3(0.0,0.0,t*speed)) - 0.5;',
+    '  return length(p) - r + n*amp;',
     '}',
     '',
     'void main(){',
@@ -952,7 +968,9 @@
     '    ));',
     '    float fres = pow(1.0 - max(dot(nrm, -rd), 0.0), 2.2);',
     '    float light = max(dot(nrm, normalize(vec3(0.4,0.6,0.8))), 0.0);',
-    '    col = base*(0.22+0.9*light) + base*fres*1.6;',
+    // The rim brightens with volume too, on top of the size change already in
+    // sceneDist — a louder moment should visibly flare, not just swell.
+    '    col = base*(0.22+0.9*light) + base*fres*(1.5+0.9*uVol);',
     '    col += base*0.15*fbm(p*4.0 - vec3(0.0,0.0,uTime*0.3));',
     '    alpha = 1.0;',
     '  } else {',
@@ -962,6 +980,24 @@
     '    float glow = smoothstep(0.9, 0.15, dist);',
     '    col = base * glow * (0.5+0.5*uVol) * 0.9;',
     '    alpha = glow;',
+    '',
+    // Energy dust orbiting the corona — tiny bright motes, not the smooth glow
+    // gradient. `hash()` on a per-cell id (not the smoothed `vnoise`, whose
+    // trilinear averaging regresses toward the middle of its range and never
+    // actually reaches a threshold worth lighting up) gives a reliable ~3% of
+    // cells a spark each, each with its own steady twinkle phase. Sampled in
+    // the same rotated ray-space the sphere sits in, so the field drifts with
+    // it rather than sitting static on screen; a slow z-drift on top keeps it
+    // from ever repeating in an obvious loop.
+    '    vec3 cell = floor((closest*3.4 + vec3(0.0, 0.0, uTime*0.06)) * 7.0);',
+    '    float cellRand = hash(cell);',
+    '    float on = step(0.96, cellRand);',
+    '    float twinkle = 0.5 + 0.5*sin(uTime*3.0 + cellRand*40.0);',
+    '    float spark = on * (0.55 + 0.6*twinkle);',
+    '    spark *= smoothstep(1.05, 0.62, dist) * smoothstep(0.55, 0.85, dist);',
+    '    spark *= 0.6 + 1.0*uVol;',
+    '    col += mix(base, vec3(1.0), 0.65) * spark * 1.4;',
+    '    alpha = max(alpha, min(spark * 1.4, 1.0));',
     '  }',
     '',
     '  gl_FragColor = vec4(col, alpha);',
