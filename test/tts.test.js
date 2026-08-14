@@ -50,6 +50,16 @@ const service = http.createServer((req, res) => {
       res.writeHead(502, { 'Content-Type': 'application/json' });
       return res.end(JSON.stringify({ detail: 'model exploded' }));
     }
+    if (mode === 'retired') {
+      // What a decommissioned model actually looks like, in the shape hosted
+      // providers use.
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      return res.end(
+        JSON.stringify({
+          error: { message: 'The model `playai-tts` has been decommissioned.', code: 'model_decommissioned' },
+        }),
+      );
+    }
     if (mode === 'html') {
       // A proxy or a login page answering 200 with something that is not a
       // sound. Playing it would be worse than not trying.
@@ -79,6 +89,7 @@ process.env.AUTONOMY_ENABLED = 'false';
 process.env.LOG_LEVEL = 'error';
 process.env.TTS_BASE = `http://127.0.0.1:${service.address().port}`;
 process.env.TTS_KEY = 'tts-secret';
+process.env.TTS_PROVIDER = 'omnivoice';
 process.env.TTS_INSTRUCT = 'female, low pitch, british accent';
 process.env.TTS_TIMEOUT_MS = '800';
 process.env.TTS_MAX_BYTES = String(4 * 1024 * 1024);
@@ -158,4 +169,18 @@ test('an empty request is refused before anything is generated', async () => {
   const res = await say('   ');
   assert.equal(res.status, 400);
   assert.equal(asked.length, before, 'a GPU is not spent on an empty string');
+});
+
+test('a retired model says so instead of just going quiet', async () => {
+  // The failure most likely to happen on a hosted provider, and the one that
+  // is a one-line config fix — if anybody is told. Silence is not a diagnosis.
+  mode = 'retired';
+  const res = await say('Anything at all.');
+
+  assert.equal(res.status, 503, 'still falls back rather than erroring at the desk');
+  const body = await res.json();
+  assert.match(body.error, /decommissioned/, 'the provider’s own words reach the browser');
+  assert.match(body.error, /playai-tts/, 'including which model');
+
+  mode = 'ok';
 });

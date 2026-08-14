@@ -7,7 +7,7 @@
 import { Router } from 'express';
 import { briefFor, briefStream } from '../lib/voiceBrief.js';
 import { resolveIntent } from '../lib/intent.js';
-import { speak } from '../lib/tts.js';
+import { speak, lastTtsFailure } from '../lib/tts.js';
 import { ttsConfigured } from '../config.js';
 import { rateLimit } from '../lib/rateLimit.js';
 import { log } from '../lib/log.js';
@@ -45,8 +45,14 @@ voiceRouter.post('/voice/speak', rateLimit({ name: 'speak', max: 60 }), async (r
   if (res.writableEnded) return undefined;
   if (!spoken) {
     // Deliberately not an error: the caller's next move is the same either way,
-    // which is to read it in the browser's voice.
-    return res.status(503).json({ ok: false, error: 'speech service did not answer with audio' });
+    // which is to read it in the browser's voice. The reason travels with it
+    // so the panel can say what happened — "model has been decommissioned" is
+    // a one-line fix, and indistinguishable from every other silence without
+    // being told.
+    return res.status(503).json({
+      ok: false,
+      error: lastTtsFailure() || 'speech service did not answer with audio',
+    });
   }
 
   res.set('Content-Type', spoken.type);

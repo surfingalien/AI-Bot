@@ -434,9 +434,24 @@
     })
       .then(function (r) {
         // 503 is the documented "no service, use your own voice" answer, not a
-        // fault. Anything else that is not audio is treated the same way.
+        // fault. Anything else that is not audio is treated the same way — but
+        // the reason is worth keeping either way, because a retired model and a
+        // missing key are both one-line fixes that look identical as silence.
         var type = r.headers.get('content-type') || '';
-        if (!r.ok || type.indexOf('audio/') !== 0) throw new Error('no audio');
+        if (!r.ok || type.indexOf('audio/') !== 0) {
+          return r
+            .json()
+            .catch(function () {
+              return null;
+            })
+            .then(function (j) {
+              if (j && j.error) {
+                lastSpeechError = String(j.error);
+                renderVoice();
+              }
+              throw new Error('no audio');
+            });
+        }
         return r.blob();
       })
       .then(function (blob) {

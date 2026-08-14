@@ -163,16 +163,30 @@ export const config = {
   // Unset means the desk keeps using the browser, which is the right default:
   // this costs a GPU somewhere.
   tts: {
-    // An OmniVoice-compatible service — POST {text, instruct} -> audio bytes.
-    // `services/omnivoice` in this repo is one, because upstream ships a
-    // Python API and a Gradio demo but nothing to point a URL at.
+    // Two request shapes, because the two useful backends do not agree:
+    //
+    //   openai    POST {base}/audio/speech  {model, input, voice}
+    //             Groq, OpenAI, and anything else OpenAI-compatible.
+    //   omnivoice POST {base}/speak         {text, instruct, voice}
+    //             `services/omnivoice` in this repo, which exists because
+    //             upstream ships a Python API and a Gradio demo but nothing
+    //             to point a URL at.
+    provider: /^omnivoice$/i.test(env.TTS_PROVIDER || '') ? 'omnivoice' : 'openai',
     base: (env.TTS_BASE || '').replace(/\/+$/, ''),
     key: env.TTS_KEY || '',
+    // Config rather than a constant on purpose: providers retire these. Groq's
+    // playai-tts is already decommissioned, and a model id baked into the
+    // source would turn that into an outage needing a release.
+    model: env.TTS_MODEL || 'canopylabs/orpheus-v1-english',
+    // wav plays everywhere without a codec question. mp3 is smaller if the
+    // audio is crossing a slow link.
+    format: env.TTS_FORMAT || 'wav',
     // Voice design attributes: "female, low pitch, british accent". Ignored by
     // backends that do not understand them.
     instruct: env.TTS_INSTRUCT || '',
-    // A saved voice-clone prompt on the service, if it has one.
-    voice: env.TTS_VOICE || '',
+    // A named voice on an OpenAI-compatible backend, or a saved voice-clone
+    // prompt on an OmniVoice service.
+    voice: env.TTS_VOICE || 'hannah',
     // Generation is not instant even on a fast card, and a brief nobody hears
     // is worth less than a brief the browser reads badly. Past this the desk
     // falls back to its own synthesiser.
