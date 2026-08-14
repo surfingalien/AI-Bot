@@ -10,7 +10,7 @@
 // Whatever a caller gets, the shape is stable.
 
 import { config } from '../config.js';
-import { FetchError, fetchText } from '../lib/safeFetch.js';
+import { FetchError, fetchText, assertPublicUrl } from '../lib/safeFetch.js';
 import { computeIndicators } from '../lib/indicators.js';
 import { log } from '../lib/log.js';
 
@@ -139,32 +139,116 @@ function knownRoute(symbol) {
   return hit.source;
 }
 
+/**
+ * Fold a response's Set-Cookie headers into a jar.
+ *
+ * A jar rather than a single string because the cookies the crumb is bound to
+ * are not all set by one response: the consent flow sets some on the way out
+ * and some on the way back, and a later hop may reissue one an earlier hop
+ * already set. Last write wins, which is what a browser does.
+ */
+function absorbCookies(jar, headers) {
+  const lines = headers?.getSetCookie?.() || [];
+  for (const line of lines) {
+    const pair = String(line).split(';')[0];
+    const eq = pair.indexOf('=');
+    if (eq <= 0) continue;
+    jar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+  }
+  return jar;
+}
+
+function cookieHeader(jar) {
+  return [...jar.entries()].map(([k, v]) => `${k}=${v}`).join('; ');
+}
+
+/**
+ * Walk a redirect chain by hand, keeping every cookie set along the way.
+ *
+ * `fetchText` cannot do this: it follows redirects internally and hands back
+ * only the last response's headers, so anything the consent interstitial set
+ * on an intermediate hop is gone by the time it returns — which is exactly the
+ * cookie the crumb is bound to. Each hop is still validated through
+ * `assertPublicUrl`, so this keeps the SSRF guard the shared helper provides.
+ */
+async function seedCookieJar(startUrl, jar) {
+  let current = String(startUrl);
+  for (let hop = 0; hop <= config.market.crumbMaxHops; hop++) {
+    const url = await assertPublicUrl(current);
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': config.fetch.userAgent,
+        // Without an HTML Accept, Yahoo answers without a Set-Cookie at all.
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        ...(jar.size ? { Cookie: cookieHeader(jar) } : {}),
+      },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(config.market.timeoutMs),
+    });
+    absorbCookies(jar, response.headers);
+
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location');
+      if (!location) return jar;
+      current = new URL(location, url).toString();
+      continue;
+    }
+    return jar;
+  }
+  // Out of hops. Whatever was collected still stands a chance of working.
+  return jar;
+}
+
+// Yahoo returns the crumb inside an HTML-escaped payload often enough that a
+// raw copy is rejected as malformed.
+function decodeEntities(text) {
+  return String(text).replace(/&#x([0-9a-f]{1,4});/gi, (_m, hex) =>
+    String.fromCharCode(parseInt(hex, 16)),
+  );
+}
+
 async function getCrumb() {
   if (crumbCache.crumb && Date.now() - crumbCache.ts < CRUMB_TTL_MS) return crumbCache;
-  // Two extra round trips that fail together when Yahoo is gating us. Retrying
+  // Extra round trips that fail together when Yahoo is gating us. Retrying
   // them on every quote is what turns one slow call into a very slow one.
   if (Date.now() < crumbFailedUntil) return crumbCache;
   try {
-    // The consent hop hands out the session cookie the crumb is bound to.
-    const seed = await fetchText('https://fc.yahoo.com/', { maxRedirects: 2 }).catch((e) => {
-      // fc.yahoo.com answers 404 but still sets the cookie; capture it either way.
-      if (e instanceof FetchError && e.status === 404) return null;
-      throw e;
+    // A real quote page, following the consent interstitial where one is
+    // served. `fc.yahoo.com` is the older trick — it still answers, but in
+    // consent regions it hands back no usable session at all, which reads
+    // downstream as "Yahoo is rejecting us" rather than "we never logged in".
+    const jar = new Map();
+    await seedCookieJar(config.market.crumbSeedUrl, jar).catch((err) => {
+      log.debug(`yahoo crumb seed failed: ${err?.message || err}`);
+      return jar;
     });
-    let cookie = '';
-    if (seed?.headers) {
-      const raw = seed.headers.getSetCookie?.() || [];
-      cookie = raw.map((c) => c.split(';')[0]).join('; ');
+
+    // The old seed, kept as a fallback rather than deleted: it is one cheap
+    // request, and where the quote page gives nothing it sometimes still does.
+    if (!jar.size) {
+      await fetchText('https://fc.yahoo.com/', { maxRedirects: 2 })
+        .then((seed) => absorbCookies(jar, seed?.headers))
+        // fc.yahoo.com answers 404 but sets the cookie anyway, so a 404 here
+        // is a normal outcome and not worth surfacing.
+        .catch(() => jar);
     }
+
+    const cookie = cookieHeader(jar);
     const crumbRes = await fetchText(`${base()}/v1/test/getcrumb`, {
-      headers: cookie ? { Cookie: cookie } : {},
+      headers: {
+        ...(cookie ? { Cookie: cookie } : {}),
+        Accept: '*/*',
+      },
       maxRedirects: 1,
     });
-    const crumb = (crumbRes.body || '').trim();
-    if (crumb && crumb.length < 40) {
+    const crumb = decodeEntities((crumbRes.body || '').trim());
+    // A crumb is a short opaque token. An HTML error page is not, and storing
+    // one would append megabytes of markup to every quote URL.
+    if (crumb && crumb.length < 40 && !/[<>\s]/.test(crumb)) {
       crumbCache = { cookie, crumb, ts: Date.now() };
     } else {
       crumbFailedUntil = Date.now() + CRUMB_RETRY_MS;
+      log.debug('yahoo returned no usable crumb; quotes will fall back down the ladder');
     }
   } catch (err) {
     crumbFailedUntil = Date.now() + CRUMB_RETRY_MS;
